@@ -45,19 +45,42 @@ cargo run -- --headless --bbox 54.4,7.8,58.0,14.6 --width 560 --tiles 2 \
 | `--palette file.toml` | override colours (see `palettes/qbam.toml`) |
 | `--grid` | 1px grid in the `@Nx` export |
 | `--buildings`, `--no-roads` | include footprints / drop roads+rail |
-| `--input file.json` | render a saved Overpass response (the only option on wasm) |
+| `--input file.json` | render a saved Overpass response |
 | `--headless` | generate + export and exit |
+| `--labels false`, `--label-color`, `--cities false` | region/city name labels (5×7 pixel font, transliterated) |
+| `--inner-borders false` | hide thin same-owner borders (owner changes always get thick borders) |
+| `--osm-borders` | keep raw OSM boundary lines instead of derived owner borders |
+| `--legend` | also write `out/<stem>.legend.png` (owner swatches) |
+| `--list-regions [--json]` | print id/level/name/pixels per region and exit |
 
 Fine detail (streams, minor roads, buildings, local borders) is dropped
 automatically as metres-per-pixel grows; the Overpass query shrinks with it.
 Overpass responses are cached in `.cache/` (`--no-cache` to refetch).
 
+`--scenario` may be repeated: files merge in order (later wins) and `Ctrl+S`
+writes the last one. A region may declare `pattern = "hatch"|"dots"` (+
+`pattern_color`) for disputed/occupied shading. Borders are derived from
+ownership: different owners ⇒ thick country border, same owner ⇒ thin (or
+none with `--inner-borders false`); no maritime borders.
+
 ### Viewer / editor
 
-drag: pan · wheel: zoom · **click** a region to select it · `1`–`9` preset
-colours · `[` / `]` rotate hue · `Ctrl+S` write assignments back to the
-scenario file (`scenarios/edited.toml` if none given) · `Ctrl+Z` undo ·
-`E` export · `R` refetch · `0` reset view.
+drag: pan · wheel: zoom · **click** a region to select (assigns it when an
+owner brush is active) · **shift+click/drag** multi-select / paint ·
+owner panel on the right (`L` toggles): click an owner to make it the brush,
+`N` types a new owner name, `Delete` removes an empty one · `1`–`9` presets /
+`[` `]` rotate hue (recolours the active owner, else the selection) ·
+`Z` zoom to selection · `D` drill down into the selection at the next admin
+level (`Backspace` returns, scenario edits carry across) · `Ctrl+S` save
+scenario (`scenarios/edited.toml` if none given) · `Ctrl+Z`/`Ctrl+Shift+Z`
+undo/redo · `E` export · `R` refetch · `0` reset view · `Esc` clear.
+
+### Web demo
+
+`trunk serve` builds the wasm target and serves the editor on
+`localhost:8080` rendering a bundled Copenhagen fixture + example scenario
+(`?bbox=&width=&scale=` query params supported; network fetching and file
+export are disabled on the web).
 
 ## Layout
 
@@ -69,7 +92,8 @@ scenario file (`scenarios/edited.toml` if none given) · `Ctrl+Z` undo ·
 - `src/palette.rs` – `Palette` (TOML-overridable), region hash colours, presets
 - `src/scenario.rs` – scenario TOML load/save/resolve
 - `src/generate.rs` – pipeline + PNG export
-- `src/viewer.rs` – Bevy plugin (background generation, pan/zoom, editor)
+- `src/font.rs` / `src/labels.rs` – embedded 5×7 pixel font, pole-of-inaccessibility label placement, city dots
+- `src/viewer.rs` – Bevy plugin (background generation, pan/zoom, owner editor, drill-down stack)
 - `tests/pipeline.rs` – integration + golden-image tests on `tests/fixtures/small.json` (`UPDATE_GOLDEN=1` to regenerate)
 
 Project scaffold based on [bevy_game_template](https://github.com/NiklasEi/bevy_game_template)

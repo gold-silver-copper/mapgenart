@@ -42,6 +42,14 @@ impl Projection {
         }
     }
 
+    /// Inverse of [`Projection::project`]: pixel coords → lon/lat.
+    pub fn unproject(&self, xy: [f64; 2]) -> [f64; 2] {
+        let lon = (xy[0] / self.width as f64 * (self.x1 - self.x0) + self.x0).to_degrees();
+        let my = xy[1] / self.height as f64 * (self.y1 - self.y0) + self.y0;
+        let lat = (2.0 * my.exp().atan() - std::f64::consts::FRAC_PI_2).to_degrees();
+        [lon, lat]
+    }
+
     pub fn project(&self, lonlat: [f64; 2]) -> [f64; 2] {
         let x = (lonlat[0].to_radians() - self.x0) / (self.x1 - self.x0) * self.width as f64;
         let y = (merc_y(lonlat[1]) - self.y0) / (self.y1 - self.y0) * self.height as f64;
@@ -58,6 +66,7 @@ pub mod layer {
     pub const COVER: u8 = 3;
     pub const LINE: u8 = 4;
     pub const SHORE: u8 = 5;
+    pub const LABEL: u8 = 6;
 }
 
 /// RGBA8 pixel canvas with a per-pixel layer tag.
@@ -500,6 +509,77 @@ pub struct Rendered {
     pub region_ids: Vec<u32>,
     pub regions: Vec<RegionInfo>,
     pub admin_level_used: Option<u8>,
+    pub proj: Projection,
+}
+
+/// A sparse pixel overlay (derived borders, labels, selection outlines).
+pub type Overlay = Vec<Option<Rgba>>;
+
+/// Apply overlays (in order) over a copy of the canvas. Overlay pixels are
+/// tagged with `tag` so post-processing can recognise them.
+pub fn compose(canvas: &Canvas, overlays: &[(&Overlay, u8)]) -> Canvas {
+    let mut out = canvas.clone();
+    for (ov, tag) in overlays {
+        for (i, c) in ov.iter().enumerate() {
+            if let Some(c) = c {
+                out.pixels[i] = *c;
+                out.tags[i] = *tag;
+            }
+        }
+    }
+    out
+}
+
+/// Derive political borders from the region-id buffer and an owner index per
+/// region (`u32::MAX` = unowned). Different owners ⇒ country style (2 px);
+/// same owner (or both unowned) ⇒ region style (1 px) when `inner` is set.
+/// No borders against the ocean.
+pub fn derive_owner_borders(r: &Rendered, owner_of: &[u32], pal: &Palette, inner: bool) -> Overlay {
+    let mut ov: Overlay = vec![None; r.region_ids.len()];
+    let (w, h) = (r.canvas.width as i32, r.canvas.height as i32);
+    let ids = &r.region_ids;
+    let tags = &r.canvas.tags;
+    let owner = |rid: u32| -> Option<u32> {
+        if rid == u32::MAX {
+            None
+        } else {
+            Some(owner_of[rid as usize])
+        }
+    };
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) as usize;
+            if tags[i] == layer::OCEAN {
+                continue;
+            }
+            let a = ids[i];
+            for (nx, ny) in [(x + 1, y), (x, y + 1)] {
+                if nx >= w || ny >= h {
+                    continue;
+                }
+                let j = (ny * w + nx) as usize;
+                if tags[j] == layer::OCEAN {
+                    continue;
+                }
+                let b = ids[j];
+                if a == b {
+                    continue;
+                }
+                match (owner(a), owner(b)) {
+                    // between two regions with different ownership (one side
+                    // owned and the other not counts too) → country border
+                    (Some(oa), Some(ob)) if oa != ob => {
+                        ov[i] = Some(pal.border_country);
+                        ov[j] = Some(pal.border_country);
+                    }
+                    // same owner / both unowned / region vs unregioned land
+                    _ if inner => ov[i] = Some(pal.border_region),
+                    _ => {}
+                }
+            }
+        }
+    }
+    ov
 }
 
 pub struct RenderOptions<'a> {
@@ -509,6 +589,9 @@ pub struct RenderOptions<'a> {
     /// Political fills at this admin level (falls back to 2); `None` disables.
     pub political_level: Option<u8>,
     pub land: Option<&'a LandPolygons>,
+    /// Draw OSM admin-boundary lines even for the level that has polygon
+    /// fills (otherwise those are replaced by derived owner borders).
+    pub osm_borders: bool,
 }
 
 /// Render features into a new canvas.
@@ -644,10 +727,21 @@ pub fn render(features: &[Feature], bbox: BBox, width: u32, opts: &RenderOptions
 
     // 4. lines in enum order (rivers under roads under borders)
     canvas.layer = layer::LINE;
+    // The admin level that has polygon fills gets derived owner borders
+    // instead of its OSM boundary lines (unless explicitly requested).
+    let replaced_border_kind = match admin_level_used {
+        Some(l) if !opts.osm_borders => Some(match l {
+            0..=3 => Kind::BorderCountry,
+            4 => Kind::BorderRegion,
+            _ => Kind::BorderLocal,
+        }),
+        _ => None,
+    };
     let mut lines: Vec<&Feature> = features
         .iter()
         .filter(|f| matches!(f.geom, Geometry::Line(_)) && line_style(pal, f.kind).is_some())
         .filter(|f| opts.detail.allows(f.kind))
+        .filter(|f| Some(f.kind) != replaced_border_kind)
         .collect();
     lines.sort_by_key(|f| f.kind);
     for f in lines {
@@ -669,6 +763,7 @@ pub fn render(features: &[Feature], bbox: BBox, width: u32, opts: &RenderOptions
         region_ids,
         regions,
         admin_level_used,
+        proj,
     }
 }
 
@@ -802,6 +897,7 @@ mod tests {
             detail: Detail::full(),
             political_level: Some(4),
             land: None,
+            osm_borders: false,
         };
         let mut r = render(&feats, bbox, 20, &opts);
         assert_eq!(r.regions.len(), 1);
@@ -837,6 +933,7 @@ mod tests {
             detail: Detail::full(),
             political_level: None,
             land: Some(&land),
+            osm_borders: false,
         };
         let r = render(&[], bbox, 20, &opts);
         assert_eq!(r.canvas.get(2, 10).unwrap(), pal.land);

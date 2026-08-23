@@ -50,9 +50,12 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 ## This greatly improves WGPU's performance due to its heavy use of trace! calls
 log = { version = "0.4", features = ["max_level_debug", "release_max_level_warn"] }
 
-# Overpass API fetching is native-only; on wasm pass --input with a pre-fetched JSON.
+# Overpass API fetching is native-only; the wasm build renders a bundled fixture.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ureq = { version = "2", features = ["json"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3", features = ["Window", "Location", "UrlSearchParams"] }
 
 [build-dependencies]
 embed-resource = "1"

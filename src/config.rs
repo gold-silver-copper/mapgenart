@@ -92,9 +92,11 @@ pub struct MapConfig {
     pub headless: bool,
 
     // --- political fills -------------------------------------------------
-    /// Scenario file (TOML) assigning colours/owners to OSM admin relations.
+    /// Scenario file(s) (TOML) assigning owners/colours to OSM admin
+    /// relations. May be given multiple times; later files win per key and
+    /// Ctrl+S in the editor writes only the last one.
     #[arg(long)]
-    pub scenario: Option<PathBuf>,
+    pub scenario: Vec<PathBuf>,
 
     /// Admin level used for political fills (2 = countries, 4 = states/regions, ...).
     /// Falls back to level 2 when no relation of the requested level is present.
@@ -140,6 +142,40 @@ pub struct MapConfig {
     /// Draw 1px grid lines between source pixels in the `@Nx` export.
     #[arg(long)]
     pub grid: bool,
+
+    // --- labels & borders ---------------------------------------------------
+    /// Draw region name labels (`--labels false` to disable).
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub labels: bool,
+
+    /// Label colour (hex).
+    #[arg(long, default_value = "#3a3a3a")]
+    pub label_color: String,
+
+    /// Draw city/town dots and names (scale permitting).
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub cities: bool,
+
+    /// Draw thin borders between regions of the same owner (`--inner-borders false` to hide).
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub inner_borders: bool,
+
+    /// Keep the raw OSM admin-boundary lines for the politically filled level
+    /// instead of the derived owner borders.
+    #[arg(long)]
+    pub osm_borders: bool,
+
+    /// Also write `out/<stem>.legend.png` with owner swatches.
+    #[arg(long)]
+    pub legend: bool,
+
+    /// Print every political region (id, level, name, pixels) and exit.
+    #[arg(long)]
+    pub list_regions: bool,
+
+    /// With --list-regions: emit JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 impl MapConfig {

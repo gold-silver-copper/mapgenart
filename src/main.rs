@@ -13,8 +13,11 @@ use std::io::Cursor;
 use winit::window::Icon;
 
 fn main() {
-    let cfg = MapConfig::parse();
-    if cfg.headless {
+    #[allow(unused_mut)]
+    let mut cfg = MapConfig::parse();
+    #[cfg(target_arch = "wasm32")]
+    apply_query_params(&mut cfg);
+    if cfg.headless || cfg.list_regions {
         if let Err(e) = run_headless(&cfg) {
             eprintln!("error: {e:#}");
             std::process::exit(1);
@@ -48,17 +51,48 @@ fn main() {
         .run();
 }
 
+/// On the web build, allow `?bbox=S,W,N,E&width=N&scale=N` in the page URL.
+#[cfg(target_arch = "wasm32")]
+fn apply_query_params(cfg: &mut MapConfig) {
+    // the web demo renders the bundled fixture; default the bbox to match it
+    cfg.bbox = "55.674,12.588,55.686,12.602".to_string();
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Ok(search) = window.location().search() else {
+        return;
+    };
+    let Ok(params) = web_sys::UrlSearchParams::new_with_str(&search) else {
+        return;
+    };
+    if let Some(b) = params.get("bbox") {
+        cfg.bbox = b;
+    }
+    if let Some(w) = params.get("width").and_then(|w| w.parse().ok()) {
+        cfg.width = w;
+    }
+    if let Some(s) = params.get("scale").and_then(|s| s.parse().ok()) {
+        cfg.scale = s;
+    }
+}
+
 fn run_headless(cfg: &MapConfig) -> anyhow::Result<()> {
     let generated = mapgenart::generate::generate(cfg)?;
+    if cfg.list_regions {
+        println!(
+            "{}",
+            mapgenart::generate::list_regions(&generated, cfg.json)
+        );
+        return Ok(());
+    }
     let canvas = generated.canvas();
-    let paths =
-        mapgenart::generate::export(canvas, &cfg.output, cfg.scale, cfg.grid, &generated.palette)?;
+    let paths = mapgenart::generate::export(&generated, cfg)?;
     println!(
         "{}x{} px ({:.0} m/px) from {} features, {} political regions{} -> {}",
         canvas.width,
         canvas.height,
         generated.metres_per_pixel,
-        generated.feature_count,
+        generated.features.len(),
         generated.rendered.regions.len(),
         generated
             .rendered
