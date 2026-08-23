@@ -10,6 +10,7 @@ use super::{MapLoad, Phase};
 use crate::config::MapConfig;
 use crate::generate::Generated;
 use crate::raster::Canvas;
+use crate::ui_font::{UiFont, UiFontPlugin};
 use bevy::asset::RenderAssetUsages;
 use bevy::image::ImageSampler;
 use bevy::prelude::*;
@@ -21,7 +22,8 @@ pub struct ViewPlugin;
 
 impl Plugin for ViewPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Tracers>()
+        app.add_plugins(UiFontPlugin)
+            .init_resource::<Tracers>()
             .add_systems(Startup, spawn_camera)
             .add_systems(OnEnter(Phase::Menu), (cleanup_session, menu_ui))
             .add_systems(Update, menu_input.run_if(in_state(Phase::Menu)))
@@ -199,15 +201,8 @@ fn despawn_ui(mut commands: Commands, ui: Query<Entity, With<Ui>>) {
 // ---------------------------------------------------------------------------
 // Menu / loading / game over
 
-fn text(t: &str, size: f32) -> (Text, TextFont, TextColor) {
-    (
-        Text::new(t),
-        TextFont {
-            font_size: FontSize::Px(size),
-            ..default()
-        },
-        TextColor(Color::WHITE),
-    )
+fn text(font: &UiFont, t: &str, size: f32) -> (Text, TextFont, TextColor) {
+    (Text::new(t), font.text_font(size), TextColor(Color::WHITE))
 }
 
 fn centre_column(commands: &mut Commands) -> Entity {
@@ -227,19 +222,21 @@ fn centre_column(commands: &mut Commands) -> Entity {
         .id()
 }
 
-fn menu_ui(mut commands: Commands, cfg: Res<MapConfig>) {
+fn menu_ui(mut commands: Commands, cfg: Res<MapConfig>, font: Res<UiFont>) {
     let root = centre_column(&mut commands);
     commands.entity(root).with_children(|ui| {
-        ui.spawn(text("LAST LIGHT", 52.0));
-        ui.spawn(text("real-time tactics on real-world ruins", 16.0));
-        ui.spawn(text(&format!("map: {}", cfg.bbox), 14.0));
-        ui.spawn(text("", 8.0));
-        ui.spawn(text("Enter – deploy the squad", 20.0));
+        ui.spawn(text(&font, "LAST LIGHT", 52.0));
+        ui.spawn(text(&font, "real-time tactics on real-world ruins", 16.0));
+        ui.spawn(text(&font, &format!("map: {}", cfg.bbox), 14.0));
+        ui.spawn(text(&font, "", 8.0));
+        ui.spawn(text(&font, "Enter – deploy the squad", 20.0));
         ui.spawn(text(
+            &font,
             "left drag: select · right click: move · A: attack-move · S/H: stop/hold · P: patrol",
             13.0,
         ));
         ui.spawn(text(
+            &font,
             "Ctrl+1-9: control groups · wheel: zoom · F12: screenshot",
             13.0,
         ));
@@ -256,11 +253,11 @@ fn menu_input(keys: Res<ButtonInput<KeyCode>>, mut next: ResMut<NextState<Phase>
     }
 }
 
-fn loading_ui(mut commands: Commands) {
+fn loading_ui(mut commands: Commands, font: Res<UiFont>) {
     let root = centre_column(&mut commands);
     commands.entity(root).with_children(|ui| {
-        ui.spawn(text("scavenging maps …", 24.0));
-        ui.spawn((text("", 15.0), HudText));
+        ui.spawn(text(&font, "scavenging maps …", 24.0));
+        ui.spawn((text(&font, "", 15.0), HudText));
     });
 }
 
@@ -270,16 +267,17 @@ fn loading_status(load: Res<MapLoad>, mut q: Query<&mut Text, With<HudText>>) {
     }
 }
 
-fn game_over_ui(mut commands: Commands, score: Option<Res<Score>>) {
+fn game_over_ui(mut commands: Commands, score: Option<Res<Score>>, font: Res<UiFont>) {
     let root = centre_column(&mut commands);
     let (kills, waves) = score.map(|s| (s.kills, s.waves_survived)).unwrap_or((0, 0));
     commands.entity(root).with_children(|ui| {
-        ui.spawn(text("THE LIGHT GOES OUT", 44.0));
+        ui.spawn(text(&font, "THE LIGHT GOES OUT", 44.0));
         ui.spawn(text(
+            &font,
             &format!("waves survived: {waves} · kills: {kills}"),
             20.0,
         ));
-        ui.spawn(text("R – try again · M – menu", 16.0));
+        ui.spawn(text(&font, "R – try again · M – menu", 16.0));
     });
 }
 
@@ -295,10 +293,10 @@ fn game_over_input(keys: Res<ButtonInput<KeyCode>>, mut next: ResMut<NextState<P
 // ---------------------------------------------------------------------------
 // HUD
 
-fn hud_ui(mut commands: Commands) {
+fn hud_ui(mut commands: Commands, font: Res<UiFont>) {
     commands.spawn((
-        text("", 14.0).0,
-        text("", 14.0).1,
+        Text::new(""),
+        font.text_font(14.0),
         TextColor(Color::WHITE),
         Node {
             position_type: PositionType::Absolute,

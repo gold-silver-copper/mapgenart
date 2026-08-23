@@ -510,8 +510,11 @@ pub struct Rendered {
     pub regions: Vec<RegionInfo>,
     pub admin_level_used: Option<u8>,
     pub proj: Projection,
-    /// Building-footprint pixels (blocks movement and line of sight).
+    /// Building wall/footprint pixels (block movement and line of sight).
     pub building: Vec<bool>,
+    /// Interior floor pixels (walkable once a door is carved; only filled
+    /// when rendering with `enterable_buildings`).
+    pub indoor: Vec<bool>,
 }
 
 impl Rendered {
@@ -605,6 +608,9 @@ pub struct RenderOptions<'a> {
     /// Draw OSM admin-boundary lines even for the level that has polygon
     /// fills (otherwise those are replaced by derived owner borders).
     pub osm_borders: bool,
+    /// Render buildings as walls + interior floors (the game carves doors and
+    /// windows into the walls) instead of solid blocks.
+    pub enterable_buildings: bool,
 }
 
 /// Render features into a new canvas.
@@ -615,6 +621,7 @@ pub fn render(features: &[Feature], bbox: BBox, width: u32, opts: &RenderOptions
     let mut region_ids = vec![u32::MAX; npx];
     let mut regions: Vec<RegionInfo> = Vec::new();
     let mut building = vec![false; npx];
+    let mut indoor = vec![false; npx];
 
     // 1. land / ocean base
     let mut canvas = match opts.land {
@@ -718,6 +725,23 @@ pub fn render(features: &[Feature], bbox: BBox, width: u32, opts: &RenderOptions
         if f.kind == Kind::Water {
             canvas.layer = layer::OCEAN;
             canvas.fill_polygon(rings, c);
+        } else if f.kind == Kind::Building && opts.enterable_buildings {
+            // interior floor …
+            let floor = lighten(c, 52);
+            fill_polygon_with(&mut canvas, rings, |cv, i| {
+                if cv.tags[i] != layer::OCEAN {
+                    cv.pixels[i] = floor;
+                    cv.tags[i] = layer::COVER;
+                    indoor[i] = true;
+                }
+            });
+            // … surrounded by walls on the outline
+            canvas.layer = layer::COVER;
+            for ring in rings.iter() {
+                for seg in ring.windows(2) {
+                    walls_line(&mut canvas, seg[0], seg[1], c, &mut building, &mut indoor);
+                }
+            }
         } else {
             let is_building = f.kind == Kind::Building;
             // land cover never paints over the sea (nature reserves, ports and
@@ -783,6 +807,39 @@ pub fn render(features: &[Feature], bbox: BBox, width: u32, opts: &RenderOptions
         admin_level_used,
         proj,
         building,
+        indoor,
+    }
+}
+
+fn lighten(c: Rgba, amount: u8) -> Rgba {
+    [
+        c[0].saturating_add(amount),
+        c[1].saturating_add(amount),
+        c[2].saturating_add(amount),
+        255,
+    ]
+}
+
+/// Draw a 1px wall along a ring segment, updating the wall/indoor masks.
+fn walls_line(
+    canvas: &mut Canvas,
+    a: [f64; 2],
+    b: [f64; 2],
+    colour: Rgba,
+    building: &mut [bool],
+    indoor: &mut [bool],
+) {
+    let steps = ((b[0] - a[0]).abs().max((b[1] - a[1]).abs()).ceil() as i32).max(1);
+    for i in 0..=steps {
+        let t = i as f64 / steps as f64;
+        let x = (a[0] + (b[0] - a[0]) * t).floor() as i32;
+        let y = (a[1] + (b[1] - a[1]) * t).floor() as i32;
+        if let Some(idx) = canvas.idx(x, y) {
+            canvas.pixels[idx] = colour;
+            canvas.tags[idx] = layer::COVER;
+            building[idx] = true;
+            indoor[idx] = false;
+        }
     }
 }
 
@@ -917,6 +974,7 @@ mod tests {
             political_level: Some(4),
             land: None,
             osm_borders: false,
+            enterable_buildings: false,
         };
         let mut r = render(&feats, bbox, 20, &opts);
         assert_eq!(r.regions.len(), 1);
@@ -953,6 +1011,7 @@ mod tests {
             political_level: None,
             land: Some(&land),
             osm_borders: false,
+            enterable_buildings: false,
         };
         let r = render(&[], bbox, 20, &opts);
         assert_eq!(r.canvas.get(2, 10).unwrap(), pal.land);

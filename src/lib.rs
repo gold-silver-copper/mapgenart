@@ -11,6 +11,7 @@ pub mod palette;
 pub mod postfx;
 pub mod raster;
 pub mod scenario;
+pub mod ui_font;
 pub mod viewer;
 
 use bevy::prelude::*;

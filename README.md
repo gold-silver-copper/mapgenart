@@ -42,13 +42,22 @@ The first custom-bbox run fetches OSM from Overpass and caches it in
   wave is bigger, faster, tougher. Survive between waves to receive **supply
   drops** at real POIs (hospitals, supermarkets): medkits, ammo (damage
   buff), recruits.
-- **Buildings are solid** — real footprints become Avian static colliders
-  (greedy rectangle meshing of the raster), soldiers path around them with
-  A* + string pulling, and hordes flow through the street canyons.
+- **Buildings are solid — and enterable.** Real footprints become walls with
+  interior floors; procedural **doors** (≥1 per building where the street
+  allows) and **windows** are carved deterministically. Walls are Avian
+  static colliders; doors let units through; windows pass *sight and bullets*
+  but not bodies — hole up inside and shoot out, but watch the doorways.
+- **Hordes aren't psychic.** Enemies wander until they see a soldier
+  (line-of-sight, windows included) or hear gunfire; sightings become shared
+  alerts the horde converges on via the flow field, then decay. Waves spawn
+  with only a rough "scent" of the squad.
 - **Fog of war & line of sight** — unexplored is black, explored is dimmed,
   and buildings block sight (per-pixel raycasts): a horde behind a building
   is invisible until it rounds the corner, on the map and the minimap alike.
   Soldiers only fire at what they can see.
+
+UI text everywhere (menus, HUD, editor) uses an embedded **Iosevka** subset
+(SIL OFL, `assets/fonts/`) — no tofu on any platform, wasm included.
 
 ### Debug/CI hooks
 

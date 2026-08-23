@@ -9,6 +9,7 @@ use crate::osm::Feature;
 use crate::palette::{self, Palette, Rgba};
 use crate::raster::{self, Overlay, Rendered};
 use crate::scenario::Scenario;
+use crate::ui_font::{UiFont, UiFontPlugin};
 use bevy::asset::RenderAssetUsages;
 use bevy::image::ImageSampler;
 use bevy::input::ButtonState;
@@ -25,7 +26,8 @@ pub struct ViewerPlugin;
 
 impl Plugin for ViewerPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<MapJob>()
+        app.add_plugins(UiFontPlugin)
+            .init_resource::<MapJob>()
             .init_resource::<Editor>()
             .init_resource::<MapStack>()
             .add_systems(Startup, (setup, start_job))
@@ -121,7 +123,12 @@ struct OwnerButton(String);
 // ---------------------------------------------------------------------------
 // Setup / job handling
 
-fn setup(mut commands: Commands, cfg: Res<MapConfig>, mut editor: ResMut<Editor>) {
+fn setup(
+    mut commands: Commands,
+    cfg: Res<MapConfig>,
+    mut editor: ResMut<Editor>,
+    font: Res<UiFont>,
+) {
     commands.spawn((Camera2d, Msaa::Off));
     let text = |bottom: f32| Node {
         position_type: PositionType::Absolute,
@@ -132,20 +139,14 @@ fn setup(mut commands: Commands, cfg: Res<MapConfig>, mut editor: ResMut<Editor>
     };
     commands.spawn((
         Text::new(""),
-        TextFont {
-            font_size: FontSize::Px(13.0),
-            ..default()
-        },
+        font.text_font(13.0),
         TextColor(Color::WHITE),
         text(8.0),
         StatusText,
     ));
     commands.spawn((
         Text::new(""),
-        TextFont {
-            font_size: FontSize::Px(13.0),
-            ..default()
-        },
+        font.text_font(13.0),
         TextColor(Color::srgb(1.0, 0.9, 0.5)),
         text(26.0),
         NoticeText,
@@ -919,6 +920,7 @@ fn rebuild_panel(
     mut editor: ResMut<Editor>,
     stack: Res<MapStack>,
     panels: Query<Entity, With<OwnerPanel>>,
+    font: Res<UiFont>,
 ) {
     if !editor.panel_dirty {
         return;
@@ -960,10 +962,7 @@ fn rebuild_panel(
     root.with_children(|ui| {
         ui.spawn((
             Text::new("Owners  (L to hide)"),
-            TextFont {
-                font_size: FontSize::Px(13.0),
-                ..default()
-            },
+            font.text_font(13.0),
             TextColor(Color::srgb(0.8, 0.8, 0.8)),
         ));
         for (owner, colour_hex) in editor.scenario.owners.clone() {
@@ -996,10 +995,7 @@ fn rebuild_panel(
                 ));
                 b.spawn((
                     Text::new(format!("{owner} ({})", counts(&owner))),
-                    TextFont {
-                        font_size: FontSize::Px(12.0),
-                        ..default()
-                    },
+                    font.text_font(12.0),
                     TextColor(Color::WHITE),
                 ));
             });
@@ -1016,10 +1012,7 @@ fn rebuild_panel(
         .with_children(|b| {
             b.spawn((
                 Text::new("+ new owner (N)"),
-                TextFont {
-                    font_size: FontSize::Px(12.0),
-                    ..default()
-                },
+                font.text_font(12.0),
                 TextColor(Color::WHITE),
             ));
         });

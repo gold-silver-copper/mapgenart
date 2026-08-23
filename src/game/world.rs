@@ -52,10 +52,11 @@ impl GameWorld {
 }
 
 /// Build the world from a generated map and spawn the static colliders.
-pub fn build_world(commands: &mut Commands, g: &Generated) -> GameWorld {
+/// `sight` overrides the line-of-sight mask (walls minus windows/doors).
+pub fn build_world(commands: &mut Commands, g: &Generated, sight: Option<Vec<bool>>) -> GameWorld {
     let (w, h) = (g.rendered.canvas.width, g.rendered.canvas.height);
     let blocked = g.rendered.blocked();
-    let sight_blocked = g.rendered.building.clone();
+    let sight_blocked = sight.unwrap_or_else(|| g.rendered.building.clone());
     let nav = NavGrid::from_blocked(w, h, &blocked);
     let rects = greedy_rects(w, h, &blocked);
     let half = Vec2::new(w as f32 / 2.0, h as f32 / 2.0);

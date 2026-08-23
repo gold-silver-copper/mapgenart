@@ -110,6 +110,7 @@ fn apply_game_defaults(cfg: &mut MapConfig) {
         }
         cfg.buildings = true;
     }
+    cfg.enterable = true;
     if !gave("--palette") {
         let p = std::path::Path::new("palettes/postapoc.toml");
         if p.exists() {

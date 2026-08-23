@@ -69,6 +69,11 @@ pub struct Enemy {
     pub damage: f32,
     pub speed: f32,
     pub cooldown: Timer,
+    /// last known / suspected target position (world coords)
+    pub alert: Option<Vec2>,
+    /// current idle-wander direction and time until it changes
+    pub wander: Vec2,
+    pub wander_t: f32,
 }
 
 #[derive(Component)]
@@ -291,6 +296,7 @@ pub fn spawn_soldier(
     e.id()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_enemy(
     commands: &mut Commands,
     sheets: Option<&SpriteSheets>,
@@ -298,12 +304,17 @@ pub fn spawn_enemy(
     hp: f32,
     speed: f32,
     damage: f32,
+    alert: Option<Vec2>,
+    wander: Vec2,
 ) -> Entity {
     let mut e = commands.spawn((
         Enemy {
             damage,
             speed,
             cooldown: Timer::from_seconds(0.8, TimerMode::Once),
+            alert,
+            wander,
+            wander_t: 2.0,
         },
         Health { hp, max: hp },
         RigidBody::Dynamic,

@@ -19,12 +19,14 @@ impl Plugin for LogicPlugin {
             .init_resource::<WaveState>()
             .init_resource::<SimRng>()
             .init_resource::<SquadBuffs>()
+            .init_resource::<Alerts>()
             .add_message::<TracerFx>()
             .add_message::<GameOver>()
             .add_systems(
                 Update,
                 (
                     soldier_move,
+                    enemy_perception,
                     refresh_flow,
                     enemy_ai,
                     soldier_combat,
@@ -102,6 +104,61 @@ impl SimRng {
     }
     pub fn range(&mut self, n: usize) -> usize {
         (self.next() % n.max(1) as u64) as usize
+    }
+
+    /// Stateless per-position hash (stable sideways bias per enemy path).
+    pub fn hash_dir(v: Vec2) -> u64 {
+        let x = (v.x * 8.0) as i64 as u64;
+        let y = (v.y * 8.0) as i64 as u64;
+        let mut h = x.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ y.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+        h ^= h >> 31;
+        h
+    }
+}
+
+/// Noise / sightings the horde investigates: positions with a time-to-live.
+/// Gunfire is loud; enemies that spot a soldier report the position. Enemies
+/// have no global knowledge — they only chase alerts and what they see.
+#[derive(Resource, Default)]
+pub struct Alerts(pub Vec<(Vec2, f32)>);
+
+pub const ALERT_TTL: f32 = 12.0;
+/// enemies within this range investigate an alert
+pub const ALERT_RADIUS: f32 = 170.0;
+/// how far an enemy can see a soldier (with line of sight)
+pub const ENEMY_SIGHT: f32 = 48.0;
+/// gunfire is heard this far
+pub const GUNSHOT_RADIUS: f32 = 110.0;
+
+impl Alerts {
+    pub fn push(&mut self, pos: Vec2) {
+        // merge with a nearby existing alert instead of piling up
+        for (p, ttl) in self.0.iter_mut() {
+            if p.distance(pos) < 24.0 {
+                *p = pos;
+                *ttl = ALERT_TTL;
+                return;
+            }
+        }
+        self.0.push((pos, ALERT_TTL));
+        if self.0.len() > 64 {
+            self.0.remove(0);
+        }
+    }
+
+    pub fn decay(&mut self, dt: f32) {
+        for (_, ttl) in self.0.iter_mut() {
+            *ttl -= dt;
+        }
+        self.0.retain(|(_, ttl)| *ttl > 0.0);
+    }
+
+    pub fn nearest(&self, pos: Vec2, max: f32) -> Option<Vec2> {
+        self.0
+            .iter()
+            .map(|(p, _)| *p)
+            .filter(|p| p.distance(pos) < max)
+            .min_by(|a, b| a.distance_squared(pos).total_cmp(&b.distance_squared(pos)))
     }
 }
 
@@ -183,6 +240,53 @@ fn soldier_move(
 // ---------------------------------------------------------------------------
 // Enemies
 
+/// Enemies notice soldiers they can see, hear gunfire, and share alerts.
+fn enemy_perception(
+    time: Res<Time>,
+    world: Res<GameWorld>,
+    mut alerts: ResMut<Alerts>,
+    mut tracer_noise: MessageReader<TracerFx>,
+    soldiers: Query<&Transform, With<Soldier>>,
+    mut enemies: Query<(&mut Enemy, &Transform)>,
+) {
+    alerts.decay(time.delta_secs());
+    // gunfire is loud
+    for t in tracer_noise.read() {
+        if !t.heal {
+            alerts.push(t.from);
+        }
+    }
+    let squad: Vec<Vec2> = soldiers.iter().map(|t| t.translation.truncate()).collect();
+    for (mut e, tf) in &mut enemies {
+        let pos = tf.translation.truncate();
+        // direct sighting (needs line of sight through walls/windows)
+        let seen = squad
+            .iter()
+            .filter(|s| s.distance(pos) < ENEMY_SIGHT)
+            .find(|s| {
+                let a = world.to_map(pos);
+                let b = world.to_map(**s);
+                Fog::line_of_sight(&world.sight_blocked, world.w, world.h, a, b)
+            })
+            .copied();
+        if let Some(s) = seen {
+            e.alert = Some(s);
+            alerts.push(s); // shriek: nearby enemies join in via the alert map
+            continue;
+        }
+        // reached a stale alert with nothing there → forget it
+        if let Some(a) = e.alert
+            && pos.distance(a) < 10.0
+        {
+            e.alert = None;
+        }
+        // pick up nearby noise
+        if e.alert.is_none() {
+            e.alert = alerts.nearest(pos, ALERT_RADIUS);
+        }
+    }
+}
+
 #[derive(Resource)]
 pub struct FlowTimer(pub Timer);
 
@@ -196,17 +300,16 @@ fn refresh_flow(
     time: Res<Time>,
     mut timer: Local<FlowTimer>,
     mut world: ResMut<GameWorld>,
-    soldiers: Query<&Transform, With<Soldier>>,
+    alerts: Res<Alerts>,
 ) {
     timer.0.tick(time.delta());
     if !timer.0.just_finished() && !world.flow.dir.is_empty() {
         return;
     }
-    let goals: Vec<(f32, f32)> = soldiers
-        .iter()
-        .map(|t| world.to_map(t.translation.truncate()))
-        .collect();
+    // the horde converges on what it heard/saw, not on live positions
+    let goals: Vec<(f32, f32)> = alerts.0.iter().map(|(p, _)| world.to_map(*p)).collect();
     if goals.is_empty() {
+        world.flow.dir.clear();
         return;
     }
     world.flow = FlowField::compute(&world.nav, &goals);
@@ -218,6 +321,7 @@ const ENEMY_CHASE: f32 = 30.0;
 fn enemy_ai(
     time: Res<Time>,
     world: Res<GameWorld>,
+    mut rng: ResMut<SimRng>,
     mut enemies: Query<(&mut Enemy, &Transform, &mut LinearVelocity)>,
     mut soldiers: Query<(&Transform, &mut Health), (With<Soldier>, Without<Enemy>)>,
 ) {
@@ -225,21 +329,21 @@ fn enemy_ai(
         .iter()
         .map(|(t, _)| t.translation.truncate())
         .collect();
+    let dt = time.delta_secs();
     for (mut e, tf, mut vel) in &mut enemies {
         e.cooldown.tick(time.delta());
         let pos = tf.translation.truncate();
+        // melee whatever is in reach, regardless of alert state
         let nearest = targets
             .iter()
             .copied()
             .min_by(|a, b| a.distance_squared(pos).total_cmp(&b.distance_squared(pos)));
-        let mut dir = Vec2::ZERO;
         if let Some(t) = nearest {
             let d = pos.distance(t);
             if d < ENEMY_CONTACT {
                 vel.0 = Vec2::ZERO;
                 if e.cooldown.is_finished() {
                     e.cooldown.reset();
-                    // hit the nearest soldier
                     if let Some((_, mut hp)) = soldiers.iter_mut().min_by(|a, b| {
                         a.0.translation
                             .truncate()
@@ -251,15 +355,43 @@ fn enemy_ai(
                 }
                 continue;
             }
+            // close-range chase only when it can actually see the target
             if d < ENEMY_CHASE {
-                dir = (t - pos).normalize_or_zero();
+                let a = world.to_map(pos);
+                let b = world.to_map(t);
+                if Fog::line_of_sight(&world.sight_blocked, world.w, world.h, a, b) {
+                    vel.0 = (t - pos).normalize_or_zero() * e.speed;
+                    continue;
+                }
             }
         }
-        if dir == Vec2::ZERO {
+        let dir = if e.alert.is_some() {
+            // investigate: follow the flow field toward the alert cluster,
+            // with a per-enemy sideways bias so hordes spread out
             let (mx, my) = world.to_map(pos);
             let (fx, fy) = world.flow.sample(&world.nav, mx, my);
-            dir = Vec2::new(fx, -fy); // map y-down → world y-up
-        }
+            let flow = Vec2::new(fx, -fy);
+            if flow == Vec2::ZERO {
+                // no field (alert expired) — walk straight at the memory
+                e.alert
+                    .map(|a| (a - pos).normalize_or_zero())
+                    .unwrap_or(Vec2::ZERO)
+            } else {
+                let side = Vec2::new(-flow.y, flow.x)
+                    * ((SimRng::hash_dir(pos) % 200) as f32 / 1000.0 - 0.1);
+                (flow + side).normalize_or_zero()
+            }
+        } else {
+            // idle wander: drift, turn now and then, bounce off walls
+            e.wander_t -= dt;
+            let ahead = pos + e.wander * 6.0;
+            if e.wander_t <= 0.0 || e.wander == Vec2::ZERO || !world.walkable_world(ahead) {
+                let a = rng.f32() * std::f32::consts::TAU;
+                e.wander = Vec2::new(a.cos(), a.sin());
+                e.wander_t = 1.5 + rng.f32() * 3.0;
+            }
+            e.wander * 0.45
+        };
         vel.0 = dir * e.speed;
     }
 }
@@ -416,6 +548,7 @@ fn wave_director(
     mut wave: ResMut<WaveState>,
     mut score: ResMut<Score>,
     mut rng: ResMut<SimRng>,
+    mut alerts: ResMut<Alerts>,
     world: Res<GameWorld>,
     sheets: Option<Res<SpriteSheets>>,
     soldiers: Query<&Transform, With<Soldier>>,
@@ -437,6 +570,7 @@ fn wave_director(
                     sheets.as_deref(),
                     &world,
                     &mut rng,
+                    &mut alerts,
                     &soldiers,
                     n,
                     hp,
@@ -463,6 +597,7 @@ fn spawn_wave(
     sheets: Option<&SpriteSheets>,
     world: &GameWorld,
     rng: &mut SimRng,
+    alerts: &mut Alerts,
     soldiers: &Query<&Transform, With<Soldier>>,
     n: u32,
     hp: f32,
@@ -470,6 +605,15 @@ fn spawn_wave(
     damage: f32,
 ) -> u32 {
     let squad: Vec<Vec2> = soldiers.iter().map(|t| t.translation.truncate()).collect();
+    // seed a couple of noisy "scent" alerts so the flow field routes the
+    // horde roughly toward the squad without perfect knowledge
+    if !squad.is_empty() {
+        let centroid = squad.iter().copied().sum::<Vec2>() / squad.len() as f32;
+        for _ in 0..3 {
+            let noise = Vec2::new(rng.f32() - 0.5, rng.f32() - 0.5) * 140.0;
+            alerts.push(centroid + noise);
+        }
+    }
     let mut spawned = 0;
     let mut guard = 0;
     while spawned < n && guard < n * 50 {
@@ -492,7 +636,21 @@ fn spawn_wave(
         if squad.iter().any(|s| s.distance(pos) < 90.0) {
             continue; // don't spawn on top of the squad
         }
-        spawn_enemy(commands, sheets, pos, hp, speed, damage);
+        // the horde smells the living: a rough (noisy) idea of the squad
+        let centroid = squad.iter().copied().sum::<Vec2>() / squad.len().max(1) as f32;
+        let noise = Vec2::new(rng.f32() - 0.5, rng.f32() - 0.5) * 160.0;
+        let jitter = 0.8 + rng.f32() * 0.45;
+        let a = rng.f32() * std::f32::consts::TAU;
+        spawn_enemy(
+            commands,
+            sheets,
+            pos,
+            hp,
+            speed * jitter,
+            damage,
+            Some(centroid + noise),
+            Vec2::new(a.cos(), a.sin()),
+        );
         spawned += 1;
     }
     spawned

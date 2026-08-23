@@ -1,6 +1,7 @@
 //! "Last Light" — real-time tactics on OSM pixel-art maps. StarCraft-style
 //! squad control, hordes, fog of war; no base building.
 
+pub mod buildings;
 pub mod control;
 pub mod fog;
 pub mod logic;
@@ -114,8 +115,8 @@ fn poll_load(
             load.status = format!("map load error: {e:#}");
             error!("{e:#}");
         }
-        Ok(g) => {
-            setup_session(&mut commands, &cfg, &g, images);
+        Ok(mut g) => {
+            setup_session(&mut commands, &cfg, &mut g, images);
             next.set(Phase::Playing);
         }
     }
@@ -125,10 +126,15 @@ fn poll_load(
 pub fn setup_session(
     commands: &mut Commands,
     cfg: &MapConfig,
-    g: &Generated,
+    g: &mut Generated,
     images: Option<ResMut<Assets<Image>>>,
 ) {
-    let world = world::build_world(commands, g);
+    let carved = if cfg.enterable && g.rendered.indoor.iter().any(|b| *b) {
+        Some(buildings::carve(g))
+    } else {
+        None
+    };
+    let world = world::build_world(commands, g, carved.map(|c| c.sight));
     // squad spawns around the centre of the map on walkable ground
     let centre = (world.w as f32 / 2.0, world.h as f32 / 2.0);
     let sheets = images.map(|mut images| {
@@ -175,6 +181,7 @@ pub fn setup_session(
     commands.insert_resource(logic::Score::default());
     commands.insert_resource(logic::WaveState::default());
     commands.insert_resource(logic::SquadBuffs::default());
+    commands.insert_resource(logic::Alerts::default());
 }
 
 fn watch_game_over(mut over: MessageReader<logic::GameOver>, mut next: ResMut<NextState<Phase>>) {
@@ -204,10 +211,11 @@ pub fn run_headless_sim(cfg: &MapConfig, ticks: u32) -> anyhow::Result<String> {
         .insert_resource(avian2d::prelude::Gravity(Vec2::ZERO))
         .add_plugins(logic::LogicPlugin);
     {
+        let mut g = g;
         let world_cell = app.world_mut();
         let mut commands_queue = bevy::ecs::world::CommandQueue::default();
         let mut commands = Commands::new(&mut commands_queue, world_cell);
-        setup_session(&mut commands, cfg, &g, None);
+        setup_session(&mut commands, cfg, &mut g, None);
         commands_queue.apply(app.world_mut());
     }
     // scripted order: attack-move the whole squad toward the east edge
@@ -274,10 +282,11 @@ pub fn run_stress(cfg: &MapConfig, n: u32, ticks: u32) -> anyhow::Result<(usize,
         .insert_resource(avian2d::prelude::Gravity(Vec2::ZERO))
         .add_plugins(logic::LogicPlugin);
     {
+        let mut g = g;
         let world_cell = app.world_mut();
         let mut queue = bevy::ecs::world::CommandQueue::default();
         let mut commands = Commands::new(&mut queue, world_cell);
-        setup_session(&mut commands, cfg, &g, None);
+        setup_session(&mut commands, cfg, &mut g, None);
         queue.apply(app.world_mut());
     }
     // pile n riflemen onto one spot and order them across the map

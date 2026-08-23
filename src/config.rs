@@ -190,6 +190,11 @@ pub struct MapConfig {
     /// Starting squad size.
     #[arg(long, default_value_t = 8)]
     pub squad: u32,
+
+    /// Render buildings as walls + floors and carve procedural doors/windows
+    /// (the game turns this on by default).
+    #[arg(long)]
+    pub enterable: bool,
 }
 
 impl MapConfig {

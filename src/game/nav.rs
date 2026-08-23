@@ -276,6 +276,9 @@ impl FlowField {
 
     /// Unit-length-ish step direction at a world position (map px, y-down).
     pub fn sample(&self, grid: &NavGrid, x: f32, y: f32) -> (f32, f32) {
+        if self.dir.is_empty() {
+            return (0.0, 0.0);
+        }
         let c = grid.cell_of(x, y);
         match grid.idx(c.0, c.1) {
             Some(i) => {

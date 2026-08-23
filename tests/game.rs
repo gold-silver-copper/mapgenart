@@ -2,8 +2,10 @@
 
 use clap::Parser;
 use mapgenart::config::MapConfig;
+use mapgenart::game::buildings;
 use mapgenart::game::fog::Fog;
-use mapgenart::game::nav::{NavGrid, greedy_rects};
+use mapgenart::game::logic::Alerts;
+use mapgenart::game::nav::{CELL, NavGrid, greedy_rects};
 use mapgenart::generate;
 use mapgenart::palette::Palette;
 use mapgenart::scenario::Scenario;
@@ -190,4 +192,129 @@ fn postapoc_palette_loads() {
     let p = Palette::load(std::path::Path::new("palettes/postapoc.toml")).unwrap();
     assert_ne!(p.ocean, Palette::default().ocean);
     let _ = Scenario::default();
+}
+
+fn sf_enterable(width: &str) -> generate::Generated {
+    let c = MapConfig::parse_from([
+        "mapgenart",
+        "--input",
+        SF,
+        "--bbox",
+        SF_BBOX,
+        "--width",
+        width,
+        "--buildings",
+        "--enterable",
+        "--no-political",
+        "--labels",
+        "false",
+        "--cities",
+        "false",
+    ]);
+    generate::generate(&c).unwrap()
+}
+
+#[test]
+fn doors_make_interiors_reachable() {
+    let mut g = sf_enterable("1024");
+    let carved = buildings::carve(&mut g);
+    let (w, h) = (g.rendered.canvas.width, g.rendered.canvas.height);
+    // movement mask: carved walls + water
+    let mut blocked = carved.walls.clone();
+    for (i, t) in g.rendered.canvas.tags.iter().enumerate() {
+        if *t == mapgenart::raster::layer::OCEAN {
+            blocked[i] = true;
+        }
+    }
+    let grid = NavGrid::from_blocked(w, h, &blocked);
+    // BFS over walkable nav cells from an outdoor corner-ish seed
+    let seed = grid.nearest_walkable((4, 4)).expect("outdoor seed");
+    let mut seen = vec![false; (grid.w * grid.h) as usize];
+    let mut q = std::collections::VecDeque::from([seed]);
+    seen[grid.idx(seed.0, seed.1).unwrap()] = true;
+    while let Some((x, y)) = q.pop_front() {
+        for (nx, ny) in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)] {
+            if let Some(i) = grid.idx(nx, ny)
+                && !seen[i]
+                && !grid.blocked[i]
+            {
+                seen[i] = true;
+                q.push_back((nx, ny));
+            }
+        }
+    }
+    let (mut indoor_cells, mut reachable) = (0usize, 0usize);
+    for (i, ind) in g.rendered.indoor.iter().enumerate() {
+        if !*ind {
+            continue;
+        }
+        let (x, y) = ((i as u32 % w) / CELL, (i as u32 / w) / CELL);
+        let ci = (y * grid.w + x) as usize;
+        if !grid.blocked[ci] {
+            indoor_cells += 1;
+            if seen[ci] {
+                reachable += 1;
+            }
+        }
+    }
+    assert!(indoor_cells > 1000, "{indoor_cells} indoor nav cells");
+    let frac = reachable as f64 / indoor_cells as f64;
+    assert!(
+        frac > 0.7,
+        "only {:.0}% of interiors reachable",
+        frac * 100.0
+    );
+}
+
+#[test]
+fn windows_pass_sight_but_block_movement() {
+    let mut g = sf_enterable("400");
+    let carved = buildings::carve(&mut g);
+    let windows: Vec<usize> = carved
+        .walls
+        .iter()
+        .zip(carved.sight.iter())
+        .enumerate()
+        .filter(|(_, (w, s))| **w && !**s)
+        .map(|(i, _)| i)
+        .collect();
+    assert!(windows.len() > 100, "{} windows", windows.len());
+    // a ray straight through a window pixel passes the sight mask
+    let (w, h) = (g.rendered.canvas.width, g.rendered.canvas.height);
+    let mut verified = false;
+    for i in windows {
+        let (x, y) = ((i as u32 % w) as f32, (i as u32 / w) as f32);
+        let a = (x - 1.5, y);
+        let b = (x + 1.5, y);
+        let ai = (y as u32 * w + (x - 1.0) as u32) as usize;
+        let bi = (y as u32 * w + (x + 1.0) as u32) as usize;
+        if x < 2.0 || x > w as f32 - 2.0 || carved.sight[ai] || carved.sight[bi] {
+            continue;
+        }
+        assert!(
+            Fog::line_of_sight(&carved.sight, w, h, a, b),
+            "sight must pass the window"
+        );
+        verified = true;
+        break;
+    }
+    assert!(verified, "no straight-through window found to verify");
+}
+
+#[test]
+fn alerts_merge_decay_and_query() {
+    let mut a = Alerts::default();
+    a.push(bevy_math_vec(10.0, 10.0));
+    a.push(bevy_math_vec(15.0, 12.0)); // merges (<24 apart)
+    assert_eq!(a.0.len(), 1);
+    a.push(bevy_math_vec(200.0, 0.0));
+    assert_eq!(a.0.len(), 2);
+    assert!(a.nearest(bevy_math_vec(0.0, 0.0), 50.0).is_some());
+    assert!(a.nearest(bevy_math_vec(500.0, 500.0), 50.0).is_none());
+    a.decay(mapgenart::game::logic::ALERT_TTL + 1.0);
+    assert!(a.0.is_empty());
+}
+
+fn bevy_math_vec(x: f32, y: f32) -> bevy::math::Vec2 {
+    bevy::math::Vec2::new(x, y)
 }

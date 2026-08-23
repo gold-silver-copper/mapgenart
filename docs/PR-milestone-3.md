@@ -87,3 +87,29 @@ RNG) and print a summary; visual systems are cleanly separated in
 - 300-enemy wave benchmark: measured 208 simultaneous dynamic units at
   ~4 ms/tick in debug; release builds are far faster. Wave sizes reach 300+
   enemies by wave ~59 by formula; not separately profiled.
+
+## Follow-up commit: Iosevka, enterable buildings, smarter AI
+
+- **Embedded Iosevka** (`src/ui_font.rs`): 196 KB fontTools subset (Latin +
+  Latin-Ext + punctuation/arrows/shapes, OFL license bundled) compiled into
+  the binary at plugin-build time; every `TextFont` in game and editor uses
+  it — no tofu, wasm included.
+- **Enterable buildings** (`--enterable`, on by default in the game):
+  buildings render as walls + interior floors (`RenderOptions::
+  enterable_buildings`, new `Rendered::indoor` mask); `game/buildings.rs`
+  labels interiors, finds through-wall candidates (1 px and 2 px walls),
+  carves ~5 px doors (nav-grid safe; deterministic hash spread, up to 4 for
+  big interiors) and windows (sight passes, movement blocked), and repaints
+  them on the composed canvas. Downtown SF: **3 988 interiors, 3 987 doors,
+  10 027 windows**; ≥70 % of interior nav cells reachable from the street
+  (tested; the rest are courtyard-locked).
+- **Enemy AI**: no more omniscience. Enemies idle-wander (per-enemy jittered
+  speed and direction, wall bounce); they acquire targets by *seeing* them
+  (LOS, so windows matter) or *hearing* gunfire; sightings publish decaying
+  shared `Alerts` the flow field now converges on (instead of live soldier
+  positions); close-range chase also requires line of sight; waves spawn
+  with a noisy squad "scent" instead of exact knowledge. Empty flow fields
+  no longer panic (`FlowField::sample` guard).
+- Tests: 56 total — new door-reachability (SF, ≥70 %), windows-pass-sight/
+  block-movement, alert merge/decay/query, carve determinism; windowed and
+  editor smoke runs clean; clippy clean; wasm + trunk build.

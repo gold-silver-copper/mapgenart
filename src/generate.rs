@@ -197,6 +197,7 @@ pub fn render_features(
         },
         land,
         osm_borders: cfg.osm_borders,
+        enterable_buildings: cfg.enterable,
     };
     let mut rendered = raster::render(&features, bbox, width, &opts);
     let fx = PostFx {
