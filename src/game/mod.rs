@@ -77,6 +77,7 @@ fn poll_load(
     cfg: Res<MapConfig>,
     mut next: ResMut<NextState<Phase>>,
     images: Option<ResMut<Assets<Image>>>,
+    mut cam: Query<&mut Transform, With<Camera2d>>,
 ) {
     let mut done = None;
     let mut progress = Vec::new();
@@ -118,6 +119,11 @@ fn poll_load(
         Ok(mut g) => {
             setup_session(&mut commands, &cfg, &mut g, images);
             next.set(Phase::Playing);
+            // start zoomed in on the squad (units are person-sized now)
+            for mut tf in &mut cam {
+                tf.translation = Vec3::ZERO;
+                tf.scale = Vec3::new(0.4, 0.4, 1.0);
+            }
         }
     }
 }

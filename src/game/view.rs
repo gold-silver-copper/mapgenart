@@ -2,7 +2,7 @@
 //! health bars, tracers, box select), minimap, HUD, menu / game-over screens,
 //! F12 screenshots. Kept apart from `logic` so headless runs skip it all.
 
-use super::control::BoxSelect;
+use super::control::{BoxSelect, Paused};
 use super::logic::{Score, SquadBuffs, TracerFx, WaveState};
 use super::units::*;
 use super::world::{GameWorld, StaticWorld};
@@ -43,6 +43,7 @@ impl Plugin for ViewPlugin {
                     minimap_update,
                     minimap_click,
                     screenshot_key,
+                    pause_menu,
                 )
                     .run_if(in_state(Phase::Playing).and_then(resource_exists::<GameWorld>)),
             )
@@ -232,14 +233,10 @@ fn menu_ui(mut commands: Commands, cfg: Res<MapConfig>, font: Res<UiFont>) {
         ui.spawn(text(&font, "Enter – deploy the squad", 20.0));
         ui.spawn(text(
             &font,
-            "left drag: select · right click: move · A: attack-move · S/H: stop/hold · P: patrol",
+            "left drag: select · right click: move/attack · middle drag: pan · wheel: zoom to cursor",
             13.0,
         ));
-        ui.spawn(text(
-            &font,
-            "Ctrl+1-9: control groups · wheel: zoom · F12: screenshot",
-            13.0,
-        ));
+        ui.spawn(text(&font, "Esc in game shows every control", 13.0));
     });
 }
 
@@ -292,6 +289,89 @@ fn game_over_input(keys: Res<ButtonInput<KeyCode>>, mut next: ResMut<NextState<P
 
 // ---------------------------------------------------------------------------
 // HUD
+
+const CONTROLS: [(&str, &str); 16] = [
+    ("left click / drag", "select soldier / box-select"),
+    ("shift + click / drag", "add to selection"),
+    ("ctrl + click", "select all of that class on screen"),
+    ("F2", "select the whole squad"),
+    ("right click", "move (formation) / attack-move an enemy"),
+    ("A + left click", "attack-move"),
+    ("S / H / P + click", "stop / hold position / patrol"),
+    ("ctrl + 1-9", "assign control group"),
+    ("1-9 (double-tap)", "recall group (centre camera)"),
+    ("middle-mouse drag", "pan the map"),
+    ("arrows / W D / edge", "pan the map"),
+    ("wheel", "zoom to cursor"),
+    ("minimap click", "jump the camera"),
+    ("F12", "screenshot"),
+    ("Esc", "cancel command / this menu"),
+    ("M (game over)", "back to the main menu"),
+];
+
+#[derive(Component)]
+struct PauseMenu;
+
+/// ESC pause menu: freezes the simulation and lists every control.
+fn pause_menu(
+    mut commands: Commands,
+    paused: Res<Paused>,
+    font: Res<UiFont>,
+    existing: Query<Entity, With<PauseMenu>>,
+) {
+    if !paused.is_changed() {
+        return;
+    }
+    for e in &existing {
+        commands.entity(e).despawn();
+    }
+    if !paused.0 {
+        return;
+    }
+    commands
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                row_gap: Val::Px(4.0),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.02, 0.02, 0.04, 0.82)),
+            GlobalZIndex(50),
+            PauseMenu,
+            Ui,
+        ))
+        .with_children(|ui| {
+            ui.spawn(text(&font, "PAUSED", 34.0));
+            ui.spawn(text(&font, "", 10.0));
+            for (key, what) in CONTROLS {
+                ui.spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    column_gap: Val::Px(12.0),
+                    width: Val::Px(540.0),
+                    justify_content: JustifyContent::SpaceBetween,
+                    ..default()
+                })
+                .with_children(|row| {
+                    row.spawn((
+                        Text::new(key),
+                        font.text_font(15.0),
+                        TextColor(Color::srgb(1.0, 0.85, 0.4)),
+                    ));
+                    row.spawn((
+                        Text::new(what),
+                        font.text_font(15.0),
+                        TextColor(Color::srgb(0.85, 0.85, 0.85)),
+                    ));
+                });
+            }
+            ui.spawn(text(&font, "", 10.0));
+            ui.spawn(text(&font, "Esc – resume", 16.0));
+        });
+}
 
 fn hud_ui(mut commands: Commands, font: Res<UiFont>) {
     commands.spawn((
@@ -432,7 +512,7 @@ fn draw_gizmos(
         if sel.is_some() {
             gizmos.circle_2d(
                 Isometry2d::from_translation(p),
-                UNIT_RADIUS + 2.0,
+                UNIT_RADIUS + 1.2,
                 Color::srgb(0.3, 1.0, 0.3),
             );
         }
@@ -484,9 +564,9 @@ fn draw_gizmos(
 }
 
 fn health_bar(gizmos: &mut Gizmos, p: Vec2, hp: &Health, colour: Color) {
-    let w = 8.0;
+    let w = 4.0;
     let frac = (hp.hp / hp.max).clamp(0.0, 1.0);
-    let y = p.y + UNIT_RADIUS + 4.0;
+    let y = p.y + UNIT_RADIUS + 2.0;
     gizmos.line_2d(
         Vec2::new(p.x - w / 2.0, y),
         Vec2::new(p.x - w / 2.0 + w * frac, y),

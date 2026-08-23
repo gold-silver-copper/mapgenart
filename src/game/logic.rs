@@ -702,7 +702,7 @@ fn pickups(
         let dp = dtf.translation.truncate();
         let taker = soldiers
             .iter()
-            .any(|(t, _)| t.translation.truncate().distance(dp) < 8.0);
+            .any(|(t, _)| t.translation.truncate().distance(dp) < 5.0);
         if !taker {
             continue;
         }

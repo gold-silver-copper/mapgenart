@@ -26,12 +26,17 @@ The first custom-bbox run fetches OSM from Overpass and caches it in
 | input | action |
 |---|---|
 | left click / drag | select soldier / box-select |
-| shift | add to selection |
-| right click | move (formation) |
+| shift + click/drag | add to selection |
+| ctrl + click | select every soldier of that class on screen |
+| `F2` | select the whole squad |
+| right click | move (formation) · on a visible enemy: attack-move |
 | `A` + left click | attack-move |
 | `S` / `H` / `P` + click | stop / hold position / patrol |
-| Ctrl+`1`–`9` / `1`–`9` | assign / recall control group |
-| WASD-arrows / edge / minimap click | pan camera · wheel: zoom |
+| Ctrl+`1`–`9` / `1`–`9` | assign / recall control group (double-tap: centre camera) |
+| middle-mouse drag | pan the map |
+| arrows / `W` `D` / screen edge / minimap click | pan camera |
+| wheel | zoom to the cursor |
+| `Esc` | cancel pending command / **pause menu with all controls** |
 | `F12` | screenshot to `out/screenshot-NNN.png` |
 | Enter | start (menu) · `R` retry (game over) |
 

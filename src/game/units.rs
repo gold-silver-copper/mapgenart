@@ -125,15 +125,16 @@ pub struct SpriteSheets {
     pub supply: Handle<Image>,
 }
 
-pub const UNIT_RADIUS: f32 = 2.6;
-pub const ENEMY_RADIUS: f32 = 2.2;
+pub const UNIT_RADIUS: f32 = 1.4;
+pub const ENEMY_RADIUS: f32 = 1.2;
 pub const VISION_RADIUS: f32 = 55.0;
 
 const T: [u8; 4] = [0, 0, 0, 0];
 
-/// Build a 13×13 top-down soldier facing +X: shoulders, helmet, weapon.
+/// Build a 7×7 top-down soldier facing +X: shoulders, helmet, weapon.
+/// Proportional to the streets: a person is ~1.5 px wide at 2–3 m/px.
 fn soldier_sprite(helmet: [u8; 4], body: [u8; 4], gun: bool) -> (Vec<u8>, u32) {
-    const N: u32 = 13;
+    const N: u32 = 7;
     let mut px = vec![T; (N * N) as usize];
     let set = |px: &mut Vec<[u8; 4]>, x: i32, y: i32, c: [u8; 4]| {
         if (0..N as i32).contains(&x) && (0..N as i32).contains(&y) {
@@ -142,21 +143,16 @@ fn soldier_sprite(helmet: [u8; 4], body: [u8; 4], gun: bool) -> (Vec<u8>, u32) {
     };
     let c = (N / 2) as i32;
     // shoulders (perpendicular to facing)
-    for dy in -3..=3 {
-        for dx in -1..=1 {
-            set(&mut px, c + dx, c + dy, body);
-        }
+    for dy in -2..=2 {
+        set(&mut px, c, c + dy, body);
     }
+    set(&mut px, c - 1, c - 1, body);
+    set(&mut px, c - 1, c + 1, body);
     // helmet
-    for dy in -1..=1i32 {
-        for dx in -1..=1i32 {
-            if dx.abs() + dy.abs() <= 2 {
-                set(&mut px, c + dx, c + dy, helmet);
-            }
-        }
-    }
+    set(&mut px, c, c, helmet);
+    set(&mut px, c - 1, c, helmet);
     if gun {
-        for dx in 2..=5 {
+        for dx in 1..=2 {
             set(&mut px, c + dx, c - 1, [40, 40, 40, 255]);
         }
     }
@@ -164,59 +160,45 @@ fn soldier_sprite(helmet: [u8; 4], body: [u8; 4], gun: bool) -> (Vec<u8>, u32) {
 }
 
 fn enemy_sprite() -> (Vec<u8>, u32) {
-    const N: u32 = 11;
+    const N: u32 = 5;
     let mut px = vec![T; (N * N) as usize];
     let c = (N / 2) as i32;
     for y in 0..N as i32 {
         for x in 0..N as i32 {
             let (dx, dy) = (x - c, y - c);
             let d2 = dx * dx + dy * dy;
-            if d2 <= 16 {
-                let jag = (x * 7 + y * 13) % 5;
-                px[(y * N as i32 + x) as usize] = if d2 <= 4 {
-                    [150, 40, 40, 255]
-                } else if d2 <= 12 + (jag & 1) * 4 {
-                    [95, 60, 50, 255]
-                } else {
-                    T
-                };
-            }
+            px[(y * N as i32 + x) as usize] = if d2 == 0 {
+                [150, 40, 40, 255]
+            } else if d2 <= 2 {
+                [95, 60, 50, 255]
+            } else {
+                T
+            };
         }
     }
     (px.into_iter().flatten().collect(), N)
 }
 
 fn corpse_sprite() -> (Vec<u8>, u32) {
-    const N: u32 = 11;
+    const N: u32 = 5;
     let mut px = vec![T; (N * N) as usize];
-    for (x, y) in [
-        (2, 5),
-        (3, 5),
-        (4, 6),
-        (5, 6),
-        (6, 5),
-        (7, 6),
-        (8, 5),
-        (5, 4),
-        (4, 7),
-        (6, 7),
-    ] {
+    for (x, y) in [(1, 2), (2, 2), (3, 3), (2, 3), (3, 1)] {
         px[(y * N + x) as usize] = [70, 45, 45, 255];
     }
     (px.into_iter().flatten().collect(), N)
 }
 
 fn supply_sprite() -> (Vec<u8>, u32) {
-    const N: u32 = 9;
+    const N: u32 = 5;
     let mut px = vec![T; (N * N) as usize];
-    for y in 1..8u32 {
-        for x in 1..8u32 {
+    for y in 0..5u32 {
+        for x in 0..5u32 {
             px[(y * N + x) as usize] = [200, 170, 60, 255];
         }
     }
-    for i in 1..8u32 {
-        px[(4 * N + i) as usize] = [120, 90, 30, 255];
-        px[(i * N + 4) as usize] = [120, 90, 30, 255];
+    for i in 0..5u32 {
+        px[(2 * N + i) as usize] = [120, 90, 30, 255];
+        px[(i * N + 2) as usize] = [120, 90, 30, 255];
     }
     (px.into_iter().flatten().collect(), N)
 }
