@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy::winit::WINIT_WINDOWS;
 use clap::Parser;
-use mapgenart::{MapConfig, MapGenPlugin};
+use mapgenart::{GamePlugin, MapConfig, MapGenPlugin};
 use std::io::Cursor;
 use winit::window::Icon;
 
@@ -17,6 +17,17 @@ fn main() {
     let mut cfg = MapConfig::parse();
     #[cfg(target_arch = "wasm32")]
     apply_query_params(&mut cfg);
+    apply_game_defaults(&mut cfg);
+    if let Some(ticks) = cfg.sim_ticks {
+        match mapgenart::game::run_headless_sim(&cfg, ticks) {
+            Ok(summary) => println!("{summary}"),
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if cfg.headless || cfg.list_regions {
         if let Err(e) = run_headless(&cfg) {
             eprintln!("error: {e:#}");
@@ -25,7 +36,7 @@ fn main() {
         return;
     }
     App::new()
-        .insert_resource(cfg)
+        .insert_resource(cfg.clone())
         .insert_resource(ClearColor(Color::linear_rgb(0.12, 0.12, 0.14)))
         .add_plugins(
             DefaultPlugins
@@ -46,7 +57,7 @@ fn main() {
                     ..default()
                 }),
         )
-        .add_plugins(MapGenPlugin)
+        .add_plugins(EitherPlugin(cfg.edit))
         .add_systems(Startup, set_window_icon)
         .run();
 }
@@ -73,6 +84,56 @@ fn apply_query_params(cfg: &mut MapConfig) {
     }
     if let Some(s) = params.get("scale").and_then(|s| s.parse().ok()) {
         cfg.scale = s;
+    }
+}
+
+/// The game defaults to post-apocalyptic San Francisco (bundled map + palette)
+/// when the user did not choose a map or palette; the editor keeps the
+/// generator defaults.
+fn apply_game_defaults(cfg: &mut MapConfig) {
+    if cfg.edit || cfg.headless || cfg.list_regions {
+        return;
+    }
+    let args: Vec<String> = std::env::args().collect();
+    let gave = |flag: &str| {
+        args.iter()
+            .any(|a| a == flag || a.starts_with(&format!("{flag}=")))
+    };
+    if !gave("--bbox") && !gave("--input") && cfg!(not(target_arch = "wasm32")) {
+        let sf = std::path::Path::new("assets/maps/sf.json");
+        if sf.exists() {
+            cfg.input = Some(sf.to_path_buf());
+        }
+        cfg.bbox = "37.780,-122.425,37.795,-122.398".to_string();
+        if !gave("--width") {
+            cfg.width = 1024;
+        }
+        cfg.buildings = true;
+    }
+    if !gave("--palette") {
+        let p = std::path::Path::new("palettes/postapoc.toml");
+        if p.exists() {
+            cfg.palette = Some(p.to_path_buf());
+        }
+    }
+    if !gave("--no-political") {
+        cfg.no_political = true; // political fills are for the editor, not the ruins
+    }
+    if !gave("--labels") {
+        cfg.labels = false;
+    }
+}
+
+/// Editor with `--edit`, otherwise the game.
+struct EitherPlugin(bool);
+
+impl bevy::app::Plugin for EitherPlugin {
+    fn build(&self, app: &mut bevy::app::App) {
+        if self.0 {
+            app.add_plugins(MapGenPlugin);
+        } else {
+            app.add_plugins(GamePlugin);
+        }
     }
 }
 

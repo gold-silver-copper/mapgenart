@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod font;
+pub mod game;
 pub mod generate;
 pub mod labels;
 pub mod land;
@@ -16,7 +17,7 @@ use bevy::prelude::*;
 
 pub use config::MapConfig;
 
-/// Bevy plugin that hosts the interactive map viewer. Insert a [`MapConfig`]
+/// Bevy plugin that hosts the interactive map editor. Insert a [`MapConfig`]
 /// resource before adding it (or let it fall back to defaults).
 pub struct MapGenPlugin;
 
@@ -29,3 +30,6 @@ impl Plugin for MapGenPlugin {
         app.add_plugins(viewer::ViewerPlugin);
     }
 }
+
+/// The game (default binary experience). `--edit` opens [`MapGenPlugin`].
+pub use game::GamePlugin;

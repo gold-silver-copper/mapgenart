@@ -176,6 +176,20 @@ pub struct MapConfig {
     /// With --list-regions: emit JSON.
     #[arg(long)]
     pub json: bool,
+
+    // --- game -------------------------------------------------------------
+    /// Open the map editor instead of the game.
+    #[arg(long)]
+    pub edit: bool,
+
+    /// Run the game simulation headless for N fixed ticks, print a summary
+    /// and exit (CI smoke test).
+    #[arg(long)]
+    pub sim_ticks: Option<u32>,
+
+    /// Starting squad size.
+    #[arg(long, default_value_t = 8)]
+    pub squad: u32,
 }
 
 impl MapConfig {

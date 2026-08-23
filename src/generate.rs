@@ -75,9 +75,10 @@ pub fn owner_index(rendered: &Rendered, scenario: &Scenario) -> (Vec<String>, Ve
     let mut owners: Vec<String> = scenario.owners.keys().cloned().collect();
     for r in &rendered.regions {
         if let Some(o) = scenario.owner_of(r.id, r.name.as_deref())
-            && !owners.iter().any(|x| x == o) {
-                owners.push(o.to_string());
-            }
+            && !owners.iter().any(|x| x == o)
+        {
+            owners.push(o.to_string());
+        }
     }
     let of = rendered
         .regions

@@ -510,6 +510,19 @@ pub struct Rendered {
     pub regions: Vec<RegionInfo>,
     pub admin_level_used: Option<u8>,
     pub proj: Projection,
+    /// Building-footprint pixels (blocks movement and line of sight).
+    pub building: Vec<bool>,
+}
+
+impl Rendered {
+    /// Pixels that block unit movement: buildings and water.
+    pub fn blocked(&self) -> Vec<bool> {
+        self.building
+            .iter()
+            .zip(&self.canvas.tags)
+            .map(|(b, t)| *b || *t == layer::OCEAN)
+            .collect()
+    }
 }
 
 /// A sparse pixel overlay (derived borders, labels, selection outlines).
@@ -601,6 +614,7 @@ pub fn render(features: &[Feature], bbox: BBox, width: u32, opts: &RenderOptions
     let npx = (proj.width * proj.height) as usize;
     let mut region_ids = vec![u32::MAX; npx];
     let mut regions: Vec<RegionInfo> = Vec::new();
+    let mut building = vec![false; npx];
 
     // 1. land / ocean base
     let mut canvas = match opts.land {
@@ -705,12 +719,16 @@ pub fn render(features: &[Feature], bbox: BBox, width: u32, opts: &RenderOptions
             canvas.layer = layer::OCEAN;
             canvas.fill_polygon(rings, c);
         } else {
+            let is_building = f.kind == Kind::Building;
             // land cover never paints over the sea (nature reserves, ports and
             // the like often extend into open water)
             fill_polygon_with(&mut canvas, rings, |cv, i| {
                 if cv.tags[i] != layer::OCEAN {
                     cv.pixels[i] = c;
                     cv.tags[i] = layer::COVER;
+                    if is_building {
+                        building[i] = true;
+                    }
                 }
             });
         }
@@ -764,6 +782,7 @@ pub fn render(features: &[Feature], bbox: BBox, width: u32, opts: &RenderOptions
         regions,
         admin_level_used,
         proj,
+        building,
     }
 }
 

@@ -577,10 +577,9 @@ fn typing_input(
             break;
         };
         match &ev.logical_key {
-            Key::Character(c)
-                if buf.len() < 40 => {
-                    buf.push_str(c);
-                }
+            Key::Character(c) if buf.len() < 40 => {
+                buf.push_str(c);
+            }
             Key::Space => buf.push(' '),
             Key::Backspace => {
                 buf.pop();
@@ -768,22 +767,24 @@ fn hotkeys(
     }
 
     // Z: zoom to selection, D: drill down
-    if keys.just_pressed(KeyCode::KeyZ) && !ctrl && !editor.selection.is_empty()
-        && let Some((min, max)) = selection_pixel_bbox(&map.rendered, &editor.selection) {
-            let s = cfg.scale.max(1) as f32;
-            let (w, h) = (
-                map.rendered.canvas.width as f32,
-                map.rendered.canvas.height as f32,
-            );
-            let cx = ((min.0 + max.0) as f32 / 2.0 - w / 2.0) * s;
-            let cy = (h / 2.0 - (min.1 + max.1) as f32 / 2.0) * s;
-            let ext_x = ((max.0 - min.0 + 1) as f32) * s;
-            let ext_y = ((max.1 - min.1 + 1) as f32) * s;
-            let zoom =
-                (ext_x / window.width().max(1.0)).max(ext_y / window.height().max(1.0)) * 1.15;
-            cam.translation = Vec3::new(cx, cy, cam.translation.z);
-            cam.scale = Vec3::new(zoom.clamp(0.05, 20.0), zoom.clamp(0.05, 20.0), 1.0);
-        }
+    if keys.just_pressed(KeyCode::KeyZ)
+        && !ctrl
+        && !editor.selection.is_empty()
+        && let Some((min, max)) = selection_pixel_bbox(&map.rendered, &editor.selection)
+    {
+        let s = cfg.scale.max(1) as f32;
+        let (w, h) = (
+            map.rendered.canvas.width as f32,
+            map.rendered.canvas.height as f32,
+        );
+        let cx = ((min.0 + max.0) as f32 / 2.0 - w / 2.0) * s;
+        let cy = (h / 2.0 - (min.1 + max.1) as f32 / 2.0) * s;
+        let ext_x = ((max.0 - min.0 + 1) as f32) * s;
+        let ext_y = ((max.1 - min.1 + 1) as f32) * s;
+        let zoom = (ext_x / window.width().max(1.0)).max(ext_y / window.height().max(1.0)) * 1.15;
+        cam.translation = Vec3::new(cx, cy, cam.translation.z);
+        cam.scale = Vec3::new(zoom.clamp(0.05, 20.0), zoom.clamp(0.05, 20.0), 1.0);
+    }
     if keys.just_pressed(KeyCode::KeyD) && job.rx.is_none() && !editor.selection.is_empty() {
         if let Some((min, max)) = selection_pixel_bbox(&map.rendered, &editor.selection) {
             let pad = 2.0;
