@@ -1,0 +1,18 @@
+# Example alt-history scenario for the default Copenhagen bbox (--admin-level 4).
+# Keys under [regions] are OSM relation ids (as strings) or OSM names.
+# Colour resolution: region.color > owners[region.owner] > deterministic hash.
+
+[owners]
+"Kalmar Union" = "#d6b3e8"
+"Hanseatic League" = "#f2c199"
+
+[regions."Region Hovedstaden"]
+owner = "Kalmar Union"
+label = "Sjælland"
+
+[regions."Region Sjælland"]
+owner = "Kalmar Union"
+
+[regions."Skåne län"]
+owner = "Hanseatic League"
+label = "Scania"

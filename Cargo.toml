@@ -1,0 +1,58 @@
+[package]
+name = "mapgenart"
+version = "0.1.0"
+publish = false
+authors = ["Stephen Korzen <stephen.korzen@gmail.com>"]
+edition = "2024"
+exclude = ["dist", "build", "assets", "credits"]
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev]
+opt-level = 1
+
+# This is used by trunk as it doesn't support custom profiles: https://github.com/trunk-rs/trunk/issues/605
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+
+# Profile for distribution
+[profile.dist]
+inherits = "release"
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[features]
+dev = [
+    "bevy/dynamic_linking",
+]
+
+[dependencies]
+bevy = { version = "0.19.0", default-features = false, features = [
+    "2d",
+    "ui",
+    "png",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+toml = "0.8"
+
+# keep the following in sync with Bevy's dependencies
+winit = { version = "0.30", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png"] }
+## This greatly improves WGPU's performance due to its heavy use of trace! calls
+log = { version = "0.4", features = ["max_level_debug", "release_max_level_warn"] }
+
+# Overpass API fetching is native-only; on wasm pass --input with a pre-fetched JSON.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ureq = { version = "2", features = ["json"] }
+
+[build-dependencies]
+embed-resource = "1"

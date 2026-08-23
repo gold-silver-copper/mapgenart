@@ -1,0 +1,9 @@
+target/
+.idea/
+.DS_Store
+
+dist/
+
+/out
+/.cache
+/data
