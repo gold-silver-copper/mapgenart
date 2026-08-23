@@ -382,3 +382,44 @@ fn squad_reaches_goal_in_sf_streets() {
     assert!(mean < 12.0, "mean distance to goal {mean:.1}px");
     assert!(max < 40.0, "worst straggler {max:.1}px from goal");
 }
+
+#[test]
+fn flow_field_avoids_wall_hugging() {
+    use mapgenart::game::nav::FlowField;
+    // 40×40, one central building; goal on the west, follower starts east
+    let (w, h) = (40u32, 40u32);
+    let mut blocked = vec![false; (w * h) as usize];
+    for y in 14..26 {
+        for x in 14..26 {
+            blocked[(y * w + x) as usize] = true;
+        }
+    }
+    let g = NavGrid::from_blocked(w, h, &blocked);
+    let f = FlowField::compute(&g, &[(4.0, 20.0)]);
+    let (mut x, mut y) = (36.0f32, 20.0f32);
+    let (mut steps, mut tight_steps) = (0, 0);
+    for _ in 0..400 {
+        let (dx, dy) = f.sample(&g, x, y);
+        if dx == 0.0 && dy == 0.0 {
+            break;
+        }
+        x += dx;
+        y += dy;
+        steps += 1;
+        let c = g.cell_of(x, y);
+        if let Some(i) = g.idx(c.0, c.1)
+            && g.tight[i]
+        {
+            tight_steps += 1;
+        }
+    }
+    assert!(
+        (x - 4.0).abs() < 4.0 && (y - 20.0).abs() < 4.0,
+        "ended at {x},{y}"
+    );
+    // the detour keeps clearance: at most a small fraction touches wall-adjacent cells
+    assert!(
+        tight_steps * 4 <= steps,
+        "{tight_steps}/{steps} steps hugged the wall"
+    );
+}

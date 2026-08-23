@@ -292,32 +292,54 @@ pub struct FlowField {
 }
 
 impl FlowField {
+    /// Dijkstra with a wall-hugging penalty: tight cells (adjacent to walls)
+    /// cost 4× to enter, so the downhill directions curve around corners
+    /// through the middle of streets instead of compressing into them.
     pub fn compute(grid: &NavGrid, goals: &[(f32, f32)]) -> Self {
-        use std::collections::VecDeque;
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
         let n = (grid.w * grid.h) as usize;
         let mut dist = vec![u32::MAX; n];
-        let mut q = VecDeque::new();
+        let mut heap: BinaryHeap<Reverse<(u32, u32)>> = BinaryHeap::new();
         for g in goals {
             let c = grid.cell_of(g.0, g.1);
             if let Some(c) = grid.nearest_walkable(c) {
                 let i = grid.idx(c.0, c.1).unwrap();
                 if dist[i] != 0 {
                     dist[i] = 0;
-                    q.push_back(c);
+                    heap.push(Reverse((0, i as u32)));
                 }
             }
         }
-        while let Some((x, y)) = q.pop_front() {
-            let d = dist[grid.idx(x, y).unwrap()];
-            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+        while let Some(Reverse((d, i))) = heap.pop() {
+            if d > dist[i as usize] {
+                continue;
+            }
+            let (x, y) = ((i % grid.w) as i32, (i / grid.w) as i32);
+            for (dx, dy, base) in [
+                (1, 0, 10u32),
+                (-1, 0, 10),
+                (0, 1, 10),
+                (0, -1, 10),
+                (1, 1, 14),
+                (1, -1, 14),
+                (-1, 1, 14),
+                (-1, -1, 14),
+            ] {
+                if dx != 0 && dy != 0 && (grid.is_blocked(x + dx, y) || grid.is_blocked(x, y + dy))
+                {
+                    continue;
+                }
                 let (nx, ny) = (x + dx, y + dy);
                 if grid.is_blocked(nx, ny) {
                     continue;
                 }
                 let ni = grid.idx(nx, ny).unwrap();
-                if dist[ni] == u32::MAX {
-                    dist[ni] = d + 1;
-                    q.push_back((nx, ny));
+                let cost = if grid.tight[ni] { base * 4 } else { base };
+                let nd = d + cost;
+                if nd < dist[ni] {
+                    dist[ni] = nd;
+                    heap.push(Reverse((nd, ni as u32)));
                 }
             }
         }

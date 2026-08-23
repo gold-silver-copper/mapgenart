@@ -440,6 +440,35 @@ fn enemy_ai(
         .map(|(t, _)| t.translation.truncate())
         .collect();
     let dt = time.delta_secs();
+    // spatial hash for local separation (keeps hordes from compressing into
+    // corners and doorways)
+    const BUCKET: f32 = 8.0;
+    let mut hash: std::collections::HashMap<(i32, i32), Vec<Vec2>> =
+        std::collections::HashMap::new();
+    for (_, tf, _) in enemies.iter() {
+        let p = tf.translation.truncate();
+        hash.entry(((p.x / BUCKET) as i32, (p.y / BUCKET) as i32))
+            .or_default()
+            .push(p);
+    }
+    let separation = |pos: Vec2| -> Vec2 {
+        let (bx, by) = ((pos.x / BUCKET) as i32, (pos.y / BUCKET) as i32);
+        let mut push = Vec2::ZERO;
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                if let Some(v) = hash.get(&(bx + dx, by + dy)) {
+                    for other in v {
+                        let d = pos - *other;
+                        let len = d.length();
+                        if len > 0.001 && len < ENEMY_RADIUS * 3.0 {
+                            push += d / len * (1.0 - len / (ENEMY_RADIUS * 3.0));
+                        }
+                    }
+                }
+            }
+        }
+        push
+    };
     for (mut e, tf, mut vel) in &mut enemies {
         e.cooldown.tick(time.delta());
         let pos = tf.translation.truncate();
@@ -472,9 +501,31 @@ fn enemy_ai(
                 if Fog::line_of_sight(&world.sight_blocked, world.w, world.h, a, b) {
                     let d = world.slide(pos, (t - pos).normalize_or_zero(), ENEMY_RADIUS + 1.4);
                     vel.0 = d * e.speed;
+                    e.stuck_t = 0.0;
                     continue;
                 }
             }
+        }
+        // unstick: hunting but not actually moving → escape burst sideways
+        let moving_intent = e.alert.is_some() || e.burst_t > 0.0;
+        let moved = pos.distance(e.last_pos);
+        e.last_pos = pos;
+        if moving_intent && moved < e.speed * dt * 0.3 {
+            e.stuck_t += dt;
+        } else {
+            e.stuck_t = (e.stuck_t - dt).max(0.0);
+        }
+        if e.stuck_t > 1.0 {
+            e.stuck_t = 0.0;
+            let a = rng.f32() * std::f32::consts::TAU;
+            e.burst = Vec2::new(a.cos(), a.sin());
+            e.burst_t = 0.8 + rng.f32() * 0.7;
+        }
+        if e.burst_t > 0.0 {
+            e.burst_t -= dt;
+            let d = world.slide(pos, e.burst, ENEMY_RADIUS + 1.4);
+            vel.0 = (d + separation(pos) * 0.8).normalize_or_zero() * e.speed;
+            continue;
         }
         let dir = if e.alert.is_some() {
             // investigate: follow the flow field toward the alert cluster,
@@ -504,6 +555,8 @@ fn enemy_ai(
             e.wander * 0.45
         };
         let dir = world.slide(pos, dir, ENEMY_RADIUS + 1.4);
+        // separation keeps the horde loose without overpowering the flow
+        let dir = (dir + separation(pos) * 0.55).normalize_or_zero();
         vel.0 = dir * e.speed;
     }
 }

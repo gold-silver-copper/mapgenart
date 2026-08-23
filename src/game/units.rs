@@ -74,6 +74,11 @@ pub struct Enemy {
     /// current idle-wander direction and time until it changes
     pub wander: Vec2,
     pub wander_t: f32,
+    /// unstick: time without progress, and an escape burst overriding flow
+    pub stuck_t: f32,
+    pub last_pos: Vec2,
+    pub burst: Vec2,
+    pub burst_t: f32,
 }
 
 #[derive(Component)]
@@ -307,6 +312,10 @@ pub fn spawn_enemy(
             alert,
             wander,
             wander_t: 2.0,
+            stuck_t: 0.0,
+            last_pos: Vec2::ZERO,
+            burst: Vec2::ZERO,
+            burst_t: 0.0,
         },
         Health { hp, max: hp },
         RigidBody::Dynamic,
