@@ -368,11 +368,13 @@ fn fog_texture(world: Res<GameWorld>, fog: Res<FogOverlay>, mut images: ResMut<A
     let Some(data) = img.data.as_mut() else {
         return;
     };
+    // the terrain always shows through — fog only darkens it (deeper where
+    // never scouted) and hides units, StarCraft-style
     for (i, s) in world.fog.state.iter().enumerate() {
         data[i * 4 + 3] = match *s {
             super::fog::VISIBLE => 0,
-            super::fog::EXPLORED => 110,
-            _ => 255,
+            super::fog::EXPLORED => 90,
+            _ => 150,
         };
     }
 }
@@ -521,15 +523,17 @@ fn minimap_update(
         for x in 0..mw {
             let src = ((y * scale) * world.w + x * scale) as usize;
             let i = (y * mw + x) as usize;
-            match world.fog.state[src] {
-                super::fog::UNEXPLORED => frame.pixels[i] = [8, 8, 10, 255],
-                super::fog::EXPLORED => {
-                    let p = &mut frame.pixels[i];
-                    for c in p.iter_mut().take(3) {
-                        *c /= 2;
-                    }
+            // terrain stays readable on the minimap too; fog just darkens it
+            let dim = match world.fog.state[src] {
+                super::fog::UNEXPLORED => Some(5u16),
+                super::fog::EXPLORED => Some(3),
+                _ => None,
+            };
+            if let Some(k) = dim {
+                let p = &mut frame.pixels[i];
+                for c in p.iter_mut().take(3) {
+                    *c = (*c as u16 * (8 - k) / 8) as u8;
                 }
-                _ => {}
             }
         }
     }

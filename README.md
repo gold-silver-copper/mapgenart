@@ -51,8 +51,9 @@ The first custom-bbox run fetches OSM from Overpass and caches it in
   (line-of-sight, windows included) or hear gunfire; sightings become shared
   alerts the horde converges on via the flow field, then decay. Waves spawn
   with only a rough "scent" of the squad.
-- **Fog of war & line of sight** — unexplored is black, explored is dimmed,
-  and buildings block sight (per-pixel raycasts): a horde behind a building
+- **Fog of war & line of sight** — the full map is always rendered; fog only
+  darkens it (deepest where never scouted, lighter once explored) and hides
+  what moves in it. Buildings block sight (per-pixel raycasts): a horde behind a building
   is invisible until it rounds the corner, on the map and the minimap alike.
   Soldiers only fire at what they can see.
 
