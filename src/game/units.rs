@@ -95,6 +95,16 @@ pub struct Orders {
     pub patrol: Option<(Vec2, Vec2)>,
     /// seconds until the next A* re-plan is allowed (crowd-control)
     pub replan_cooldown: f32,
+    /// stuck detection: time spent making no progress toward the waypoint
+    pub stuck_t: f32,
+    /// cumulative wedged time (decays); drives the escalation ladder
+    pub stuck_total: f32,
+    pub last_pos: Vec2,
+    /// closest we've been to the current waypoint (resets per waypoint)
+    pub best_wp_dist: f32,
+    pub cur_wp: Vec2,
+    /// closest we've been to the final destination (ratchet)
+    pub best_goal_dist: f32,
 }
 
 #[derive(Component)]

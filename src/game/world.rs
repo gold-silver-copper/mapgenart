@@ -26,6 +26,8 @@ pub struct GameWorld {
     /// building or water pixels (block movement)
     pub blocked: Vec<bool>,
     pub nav: NavGrid,
+    /// nav cells of the largest connected walkable region
+    pub main_region: Vec<bool>,
     pub flow: FlowField,
     pub fog: Fog,
     /// supply-drop points of interest (hospitals, supermarkets) in map px
@@ -49,6 +51,65 @@ impl GameWorld {
         let c = self.nav.cell_of(x, y);
         !self.nav.is_blocked(c.0, c.1)
     }
+
+    /// Walkable AND connected to the open world (safe to spawn there).
+    pub fn spawnable_cell(&self, c: (i32, i32)) -> bool {
+        self.nav
+            .idx(c.0, c.1)
+            .map(|i| !self.nav.blocked[i] && self.main_region[i])
+            .unwrap_or(false)
+    }
+
+    /// Nearest spawnable cell (walkable + main region).
+    pub fn nearest_spawnable(&self, c: (i32, i32)) -> Option<(i32, i32)> {
+        if self.spawnable_cell(c) {
+            return Some(c);
+        }
+        for r in 1..=96i32 {
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    if dx.abs().max(dy.abs()) == r && self.spawnable_cell((c.0 + dx, c.1 + dy)) {
+                        return Some((c.0 + dx, c.1 + dy));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Pixel-precise obstacle probe (for steering / wall sliding).
+    pub fn blocked_at_world(&self, v: Vec2) -> bool {
+        let (x, y) = self.to_map(v);
+        let (xi, yi) = (x as i32, y as i32);
+        if xi < 0 || yi < 0 || xi >= self.w as i32 || yi >= self.h as i32 {
+            return true;
+        }
+        self.blocked[(yi as u32 * self.w + xi as u32) as usize]
+    }
+
+    /// Steer `dir` around walls: if the probe ahead hits an obstacle, slide
+    /// along it (increasingly rotated directions on both sides). Never
+    /// returns zero for a nonzero input: in tight doorways it degrades to a
+    /// short-probe or raw push at reduced speed — the physics engine stops
+    /// actual penetration, and a slow grind beats freezing in place.
+    pub fn slide(&self, pos: Vec2, dir: Vec2, look_ahead: f32) -> Vec2 {
+        if dir == Vec2::ZERO || !self.blocked_at_world(pos + dir * look_ahead) {
+            return dir;
+        }
+        for probe in [look_ahead, look_ahead * 0.5] {
+            for deg in [35.0f32, 60.0, 85.0] {
+                for sign in [1.0, -1.0] {
+                    let a = deg.to_radians() * sign;
+                    let (sin, cos) = a.sin_cos();
+                    let d = Vec2::new(dir.x * cos - dir.y * sin, dir.x * sin + dir.y * cos);
+                    if !self.blocked_at_world(pos + d * probe) {
+                        return d * (probe / look_ahead).max(0.5);
+                    }
+                }
+            }
+        }
+        dir * 0.4
+    }
 }
 
 /// Build the world from a generated map and spawn the static colliders.
@@ -58,6 +119,7 @@ pub fn build_world(commands: &mut Commands, g: &Generated, sight: Option<Vec<boo
     let blocked = g.rendered.blocked();
     let sight_blocked = sight.unwrap_or_else(|| g.rendered.building.clone());
     let nav = NavGrid::from_blocked(w, h, &blocked);
+    let main_region = nav.main_region();
     let rects = greedy_rects(w, h, &blocked);
     let half = Vec2::new(w as f32 / 2.0, h as f32 / 2.0);
     for (x, y, rw, rh) in &rects {
@@ -111,6 +173,7 @@ pub fn build_world(commands: &mut Commands, g: &Generated, sight: Option<Vec<boo
         sight_blocked,
         blocked,
         flow: FlowField::default(),
+        main_region,
         nav,
         fog: Fog::new(w, h),
         pois,

@@ -12,6 +12,10 @@ pub struct NavGrid {
     pub h: u32,
     /// true = impassable (building or water)
     pub blocked: Vec<bool>,
+    /// `blocked` dilated by ~1 map pixel: cells too close to a wall for a
+    /// unit to pass without scraping. Paths prefer to avoid these and only
+    /// use them when nothing wider exists (narrow doors).
+    pub tight: Vec<bool>,
     /// map width/height in pixels (world units)
     pub map_w: u32,
     pub map_h: u32,
@@ -32,10 +36,36 @@ impl NavGrid {
                 }
             }
         }
+        // clearance: a walkable cell adjacent (8-way) to a blocked cell is
+        // "tight" — passable, but paths keep out unless there is no other way
+        let mut tight = blocked.clone();
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                let i = (y as u32 * w + x as u32) as usize;
+                if blocked[i] {
+                    continue;
+                }
+                'n: for dy in -1..=1i32 {
+                    for dx in -1..=1i32 {
+                        let (nx, ny) = (x + dx, y + dy);
+                        if nx >= 0
+                            && ny >= 0
+                            && nx < w as i32
+                            && ny < h as i32
+                            && blocked[(ny as u32 * w + nx as u32) as usize]
+                        {
+                            tight[i] = true;
+                            break 'n;
+                        }
+                    }
+                }
+            }
+        }
         NavGrid {
             w,
             h,
             blocked,
+            tight,
             map_w,
             map_h,
         }
@@ -87,12 +117,25 @@ impl NavGrid {
 
     /// Straight-line walkability between two world points (supercover ray).
     pub fn line_walkable(&self, a: (f32, f32), b: (f32, f32)) -> bool {
+        self.line_ok(a, b, false)
+    }
+
+    /// Like [`Self::line_walkable`], but also refuses "tight" cells (within a
+    /// pixel of a wall) so smoothed paths keep clearance.
+    pub fn line_clear(&self, a: (f32, f32), b: (f32, f32)) -> bool {
+        self.line_ok(a, b, true)
+    }
+
+    fn line_ok(&self, a: (f32, f32), b: (f32, f32), need_clearance: bool) -> bool {
         let steps = ((b.0 - a.0).abs().max((b.1 - a.1).abs()) / (CELL as f32) * 2.0).ceil() as i32;
         for i in 0..=steps.max(1) {
             let t = i as f32 / steps.max(1) as f32;
             let (x, y) = (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
             let c = self.cell_of(x, y);
-            if self.is_blocked(c.0, c.1) {
+            let Some(idx) = self.idx(c.0, c.1) else {
+                return false;
+            };
+            if self.blocked[idx] || (need_clearance && self.tight[idx]) {
                 return false;
             }
         }
@@ -152,7 +195,9 @@ impl NavGrid {
                     continue;
                 }
                 let ni = self.idx(nx, ny).unwrap();
-                let g = g0 + cost;
+                // hugging walls is allowed but expensive: paths prefer the
+                // middle of streets and only squeeze through when needed
+                let g = g0 + if self.tight[ni] { cost * 5 } else { cost };
                 if g < best[ni] {
                     best[ni] = g;
                     prev[ni] = ci;
@@ -174,20 +219,65 @@ impl NavGrid {
             cells.push(c);
         }
         cells.reverse();
-        // string pulling: skip waypoints while the direct line is walkable
+        // string pulling: skip waypoints while the direct line keeps
+        // clearance; near walls/doors fall back to exact walkability so the
+        // dense waypoints survive and guide units through the gap
         let mut out: Vec<(f32, f32)> = Vec::new();
         let mut anchor = from;
         let mut k = 0;
         while k < cells.len() {
             let mut far = k;
-            while far + 1 < cells.len() && self.line_walkable(anchor, self.centre(cells[far + 1])) {
+            while far + 1 < cells.len() && self.line_clear(anchor, self.centre(cells[far + 1])) {
                 far += 1;
+            }
+            if far == k
+                && far + 1 < cells.len()
+                && self.line_walkable(anchor, self.centre(cells[far + 1]))
+                && self.line_walkable(self.centre(cells[far]), self.centre(cells[far + 1]))
+            {
+                // inside a tight passage: advance one cell at a time
             }
             anchor = self.centre(cells[far]);
             out.push(anchor);
             k = far + 1;
         }
         Some(out)
+    }
+}
+
+impl NavGrid {
+    /// Cells of the largest connected walkable region (the "open world" —
+    /// excludes courtyard-locked interiors and offshore islets).
+    pub fn main_region(&self) -> Vec<bool> {
+        let n = (self.w * self.h) as usize;
+        let mut label = vec![u32::MAX; n];
+        let mut sizes: Vec<usize> = Vec::new();
+        let mut stack = Vec::new();
+        for start in 0..n {
+            if self.blocked[start] || label[start] != u32::MAX {
+                continue;
+            }
+            let id = sizes.len() as u32;
+            label[start] = id;
+            stack.push(start);
+            let mut size = 0;
+            while let Some(i) = stack.pop() {
+                size += 1;
+                let (x, y) = ((i as u32 % self.w) as i32, (i as u32 / self.w) as i32);
+                for (nx, ny) in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)] {
+                    if let Some(j) = self.idx(nx, ny)
+                        && !self.blocked[j]
+                        && label[j] == u32::MAX
+                    {
+                        label[j] = id;
+                        stack.push(j);
+                    }
+                }
+            }
+            sizes.push(size);
+        }
+        let biggest = (0..sizes.len()).max_by_key(|i| sizes[*i]).map(|i| i as u32);
+        label.iter().map(|l| Some(*l) == biggest).collect()
     }
 }
 

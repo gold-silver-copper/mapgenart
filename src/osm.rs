@@ -114,7 +114,10 @@ struct Member {
 pub fn build_query(bbox: &BBox, cfg: &MapConfig, metres_per_pixel: f64) -> String {
     let b = bbox.overpass();
     let detail = crate::raster::Detail::for_scale(metres_per_pixel);
-    let landcover = metres_per_pixel < 300.0;
+    let landcover = metres_per_pixel < 60.0;
+    // wide/strategic maps: only the broad land-use classes, to keep
+    // country-sized Overpass responses manageable
+    let landcover_coarse = metres_per_pixel < 300.0;
     let mut q = String::new();
     q.push_str("[out:json][timeout:180];(\n");
     let mut line = |s: &str| {
@@ -139,6 +142,12 @@ pub fn build_query(bbox: &BBox, cfg: &MapConfig, metres_per_pixel: f64) -> Strin
         );
         line(r#"relation["natural"~"^(wood|wetland|beach)$"]({{bbox}});"#);
         line(r#"way["leisure"~"^(park|golf_course)$"]({{bbox}});"#);
+    } else if landcover_coarse {
+        line(r#"way["natural"="water"]({{bbox}});"#);
+        line(r#"way["landuse"~"^(forest|residential|industrial|farmland)$"]({{bbox}});"#);
+        line(r#"relation["landuse"~"^(forest|residential|industrial|farmland)$"]({{bbox}});"#);
+        line(r#"way["natural"~"^(wood|sand|wetland)$"]({{bbox}});"#);
+        line(r#"relation["natural"~"^(wood|wetland)$"]({{bbox}});"#);
     }
     if detail.streams {
         line(r#"way["waterway"="stream"]({{bbox}});"#);

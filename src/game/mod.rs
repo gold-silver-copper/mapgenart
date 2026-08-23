@@ -167,7 +167,7 @@ pub fn setup_session(
                 let cell = world
                     .nav
                     .cell_of(centre.0 + dx as f32 * 6.0, centre.1 + dy as f32 * 6.0);
-                if world.nav.is_blocked(cell.0, cell.1) {
+                if !world.spawnable_cell(cell) {
                     continue;
                 }
                 let (x, y) = world.nav.centre(cell);
@@ -265,6 +265,134 @@ pub fn run_headless_sim(cfg: &MapConfig, ticks: u32) -> anyhow::Result<String> {
     Ok(format!(
         "sim: {ticks} ticks, wave {wave_no}, {soldiers} soldiers ({stuck} in blocked cells), {enemies} enemies alive, {kills} kills"
     ))
+}
+
+/// Goal-reaching harness: order the squad to a reachable spot ~a third of the
+/// map away and report (mean, max) final distance to it after `ticks`.
+/// Exercises A*, clearance, wall-slide and stuck-recovery end to end.
+pub fn run_goal_sim(cfg: &MapConfig, ticks: u32) -> anyhow::Result<(f32, f32)> {
+    let debug = std::env::var("GOAL_DEBUG").is_ok();
+    // pathfinding harness: no enemy waves interfering
+    fn no_waves(mut wave: ResMut<logic::WaveState>) {
+        wave.countdown = Some(Timer::from_seconds(1.0e6, TimerMode::Once));
+    }
+    use bevy::app::ScheduleRunnerPlugin;
+    use bevy::state::app::StatesPlugin;
+    let mut g = generate::generate(cfg)?;
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(std::time::Duration::ZERO)))
+        .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::from_millis(16),
+        ))
+        .add_plugins(bevy::transform::TransformPlugin)
+        .add_plugins(bevy::diagnostic::DiagnosticsPlugin)
+        .add_plugins(StatesPlugin)
+        .init_state::<Phase>()
+        .insert_resource(cfg.clone())
+        .add_plugins(avian2d::PhysicsPlugins::default())
+        .insert_resource(avian2d::prelude::Gravity(Vec2::ZERO))
+        .add_plugins(logic::LogicPlugin)
+        .add_systems(First, no_waves);
+    {
+        let world_cell = app.world_mut();
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, world_cell);
+        setup_session(&mut commands, cfg, &mut g, None);
+        queue.apply(app.world_mut());
+    }
+    let target = {
+        let world = app.world_mut();
+        let start = {
+            let mut q = world.query_filtered::<&Transform, bevy::prelude::With<units::Soldier>>();
+            q.iter(world)
+                .next()
+                .map(|t| t.translation.truncate())
+                .expect("squad spawned")
+        };
+        let gw = world.resource::<world::GameWorld>();
+        let from = gw.to_map(start);
+        // scan for a walkable, reachable spot far from the start
+        let mut best: Option<((f32, f32), f32)> = None;
+        for cy in (2..gw.nav.h as i32 - 2).step_by(4) {
+            for cx in (2..gw.nav.w as i32 - 2).step_by(4) {
+                if gw.nav.is_blocked(cx, cy) {
+                    continue;
+                }
+                let p = gw.nav.centre((cx, cy));
+                let d = ((p.0 - from.0).powi(2) + (p.1 - from.1).powi(2)).sqrt();
+                let span = gw.w.min(gw.h) as f32;
+                if d < span * 0.25 || d > span * 0.45 {
+                    continue;
+                }
+                if gw.nav.path(from, p).is_some() && best.map(|(_, bd)| d > bd).unwrap_or(true) {
+                    best = Some((p, d));
+                }
+            }
+        }
+        let (p, _) = best.expect("a reachable target exists");
+        gw.to_world(p.0, p.1)
+    };
+    {
+        let world = app.world_mut();
+        let positions: Vec<Vec2> = {
+            let mut q = world.query_filtered::<&Transform, bevy::prelude::With<units::Soldier>>();
+            q.iter(world).map(|tf| tf.translation.truncate()).collect()
+        };
+        let paths: Vec<_> = {
+            let gw = world.resource::<world::GameWorld>();
+            positions
+                .iter()
+                .map(|pos| {
+                    let from = gw.to_map(*pos);
+                    let to = gw.to_map(target);
+                    gw.nav
+                        .path(from, to)
+                        .map(|p| {
+                            p.iter()
+                                .map(|q| gw.to_world(q.0, q.1))
+                                .collect::<std::collections::VecDeque<_>>()
+                        })
+                        .unwrap_or_else(|| std::collections::VecDeque::from([target]))
+                })
+                .collect()
+        };
+        let mut q =
+            world.query_filtered::<&mut units::Orders, bevy::prelude::With<units::Soldier>>();
+        for (mut o, path) in q.iter_mut(world).zip(paths) {
+            o.waypoints = path;
+            o.attack_move = false;
+        }
+    }
+    app.finish();
+    app.cleanup();
+    for t in 0..ticks {
+        app.update();
+        if debug && t % 500 == 0 {
+            let world = app.world_mut();
+            let mut q = world
+                .query_filtered::<(&Transform, &units::Orders), bevy::prelude::With<units::Soldier>>();
+            let ds: Vec<(i32, usize, i32)> = q
+                .iter(world)
+                .map(|(tf, o)| {
+                    (
+                        tf.translation.truncate().distance(target) as i32,
+                        o.waypoints.len(),
+                        (o.stuck_t * 10.0) as i32,
+                    )
+                })
+                .collect();
+            eprintln!("tick {t}: (dist, wps, stuck) {ds:?}");
+        }
+    }
+    let world = app.world_mut();
+    let dists: Vec<f32> = world
+        .query_filtered::<&Transform, bevy::prelude::With<units::Soldier>>()
+        .iter(world)
+        .map(|tf| tf.translation.truncate().distance(target))
+        .collect();
+    let mean = dists.iter().sum::<f32>() / dists.len().max(1) as f32;
+    let max = dists.iter().cloned().fold(0.0, f32::max);
+    Ok((mean, max))
 }
 
 /// Physics stress harness: spawn `n` extra soldiers bunched on one walkable

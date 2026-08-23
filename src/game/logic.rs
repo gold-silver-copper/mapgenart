@@ -183,15 +183,31 @@ pub struct Hurt(pub Timer);
 // ---------------------------------------------------------------------------
 // Movement
 
+/// arrival radius for the final destination …
 const ARRIVE: f32 = 3.0;
+/// … and for intermediate waypoints (looser: they only guide the route, and
+/// a wall-adjacent waypoint can be physically unreachable closer than ~3 px)
+const ARRIVE_MID: f32 = 4.6;
 
 fn soldier_move(
     time: Res<Time>,
     world: Res<GameWorld>,
-    mut q: Query<(&Soldier, &mut Orders, &Transform, &mut LinearVelocity)>,
+    mut q: Query<(
+        &Soldier,
+        &mut Orders,
+        &Transform,
+        &mut Position,
+        &mut LinearVelocity,
+    )>,
 ) {
-    for (s, mut orders, tf, mut vel) in &mut q {
-        orders.replan_cooldown = (orders.replan_cooldown - time.delta_secs()).max(0.0);
+    let dt = time.delta_secs();
+    // unit positions for snap-collision checks (see the wedge ladder)
+    let all_units: Vec<Vec2> = q
+        .iter()
+        .map(|(_, _, tf, _, _)| tf.translation.truncate())
+        .collect();
+    for (s, mut orders, tf, mut phys_pos, mut vel) in &mut q {
+        orders.replan_cooldown = (orders.replan_cooldown - dt).max(0.0);
         if orders.hold {
             vel.0 = Vec2::ZERO;
             continue;
@@ -205,34 +221,128 @@ fn soldier_move(
         }
         let pos = tf.translation.truncate();
         while let Some(&wp) = orders.waypoints.front() {
-            if pos.distance(wp) < ARRIVE {
+            let last = orders.waypoints.len() == 1;
+            let arrive = if last { ARRIVE } else { ARRIVE_MID };
+            if pos.distance(wp) < arrive {
                 orders.waypoints.pop_front();
             } else {
                 break;
             }
         }
-        match orders.waypoints.front() {
-            Some(&wp) => {
-                let dir = (wp - pos).normalize_or_zero();
-                vel.0 = dir * s.stats.speed;
-                // if the next leg is not directly walkable (physics pushed us
-                // off the path), re-plan — rate-limited so a jammed crowd
-                // doesn't run A* every frame
-                let (ax, ay) = world.to_map(pos);
-                let (bx, by) = world.to_map(wp);
-                if orders.replan_cooldown <= 0.0 && !world.nav.line_walkable((ax, ay), (bx, by)) {
-                    orders.replan_cooldown = 0.5;
-                    if let Some(path) = world.nav.path((ax, ay), (bx, by)) {
-                        let rest: Vec<Vec2> = orders.waypoints.iter().skip(1).copied().collect();
-                        orders.waypoints = path
-                            .iter()
-                            .map(|p| world.to_world(p.0, p.1))
-                            .collect::<VecDeque<_>>();
-                        orders.waypoints.extend(rest);
+        let Some(&wp) = orders.waypoints.front() else {
+            vel.0 = Vec2::ZERO;
+            orders.stuck_t = 0.0;
+            orders.stuck_total = 0.0;
+            orders.best_goal_dist = 0.0;
+            continue;
+        };
+        // stuck detection: measure *progress toward the waypoint*, not raw
+        // motion — a unit orbiting an unreachable corner moves plenty while
+        // getting nowhere
+        orders.last_pos = pos;
+        let wp_dist = pos.distance(wp);
+        if orders.cur_wp != wp {
+            orders.cur_wp = wp;
+            orders.best_wp_dist = wp_dist;
+        }
+        if wp_dist < orders.best_wp_dist - 0.4 {
+            orders.best_wp_dist = wp_dist;
+            orders.stuck_t = (orders.stuck_t - dt * 2.0).max(0.0);
+        } else {
+            orders.stuck_t += dt;
+        }
+        // the wedge meter grows while locally stuck AND not getting closer to
+        // the final destination — waypoint pops/replans can't launder it, but
+        // an honest detour (goal distance temporarily rising while the unit
+        // moves freely) doesn't count either
+        let goal = *orders.waypoints.back().unwrap_or(&wp);
+        let goal_dist = pos.distance(goal);
+        if orders.best_goal_dist == 0.0 || goal_dist < orders.best_goal_dist - 1.5 {
+            if orders.best_goal_dist != 0.0 {
+                orders.stuck_total = 0.0;
+            }
+            orders.best_goal_dist = goal_dist;
+        } else if orders.stuck_t > 0.25 {
+            orders.stuck_total += dt;
+        }
+        // escalation ladder against wedging
+        if orders.stuck_total > 2.5 {
+            // last resort after 2.5 s of futility: snap onto the waypoint's
+            // cell (a few px — invisible at pixel scale, guaranteed progress)
+            orders.stuck_total = 0.0;
+            orders.stuck_t = 0.0;
+            let (wx, wy) = world.to_map(wp);
+            let target_cell = world.nav.cell_of(wx, wy);
+            let cell = if world.spawnable_cell(target_cell) {
+                Some(target_cell)
+            } else {
+                world.nearest_spawnable(target_cell)
+            };
+            if let Some(c) = cell {
+                let (cx, cy) = world.nav.centre(c);
+                let w = world.to_world(cx, cy);
+                // never snap onto another unit: the depenetration impulse can
+                // hurl someone through a wall. Wedged-in-a-crowd resolves by
+                // itself once the crowd moves; only snap into free space.
+                let occupied = all_units
+                    .iter()
+                    .any(|u| *u != pos && u.distance(w) < UNIT_RADIUS * 2.2);
+                if !occupied {
+                    if std::env::var("GOAL_DEBUG").is_ok() {
+                        eprintln!("SNAP {} -> {:?} (wp {:?})", pos, w, wp);
                     }
+                    phys_pos.0 = w; // avian's Position is the source of truth
+                    vel.0 = Vec2::ZERO;
+                    orders.waypoints.pop_front();
+                    orders.replan_cooldown = 0.0;
                 }
             }
-            None => vel.0 = Vec2::ZERO,
+            continue;
+        }
+        if orders.stuck_t > 1.5 {
+            // skip a waypoint the physics won't let us touch
+            orders.stuck_t = 0.9;
+            if orders.waypoints.len() > 1 {
+                orders.waypoints.pop_front();
+            }
+        } else if orders.stuck_t > 0.6 && orders.replan_cooldown <= 0.0 {
+            // keep the ladder climbing: don't zero stuck_t here
+            orders.replan_cooldown = 0.6;
+            // replan the whole remaining route from where we actually are
+            let goal = *orders.waypoints.back().unwrap_or(&wp);
+            let from = world.to_map(pos);
+            let to = world.to_map(goal);
+            if let Some(path) = world.nav.path(from, to) {
+                orders.waypoints = path.iter().map(|p| world.to_world(p.0, p.1)).collect();
+            }
+            // sideways nudge to break the clinch (alternate sides over time)
+            let side = Vec2::new(-(wp - pos).y, (wp - pos).x).normalize_or_zero();
+            let sign = if (time.elapsed_secs() * 2.0) as i64 % 2 == 0 {
+                1.0
+            } else {
+                -1.0
+            };
+            vel.0 = side * sign * s.stats.speed;
+            continue;
+        }
+        let dir = (wp - pos).normalize_or_zero();
+        // wall-slide steering: don't grind into corners the path clipped
+        let dir = world.slide(pos, dir, UNIT_RADIUS + 1.6);
+        vel.0 = dir * s.stats.speed;
+        // if the next leg is not directly walkable (physics pushed us off the
+        // path), re-plan — rate-limited so a jammed crowd doesn't A* every frame
+        let (ax, ay) = world.to_map(pos);
+        let (bx, by) = world.to_map(wp);
+        if orders.replan_cooldown <= 0.0 && !world.nav.line_walkable((ax, ay), (bx, by)) {
+            orders.replan_cooldown = 0.5;
+            if let Some(path) = world.nav.path((ax, ay), (bx, by)) {
+                let rest: Vec<Vec2> = orders.waypoints.iter().skip(1).copied().collect();
+                orders.waypoints = path
+                    .iter()
+                    .map(|p| world.to_world(p.0, p.1))
+                    .collect::<VecDeque<_>>();
+                orders.waypoints.extend(rest);
+            }
         }
     }
 }
@@ -360,7 +470,8 @@ fn enemy_ai(
                 let a = world.to_map(pos);
                 let b = world.to_map(t);
                 if Fog::line_of_sight(&world.sight_blocked, world.w, world.h, a, b) {
-                    vel.0 = (t - pos).normalize_or_zero() * e.speed;
+                    let d = world.slide(pos, (t - pos).normalize_or_zero(), ENEMY_RADIUS + 1.4);
+                    vel.0 = d * e.speed;
                     continue;
                 }
             }
@@ -392,6 +503,7 @@ fn enemy_ai(
             }
             e.wander * 0.45
         };
+        let dir = world.slide(pos, dir, ENEMY_RADIUS + 1.4);
         vel.0 = dir * e.speed;
     }
 }
@@ -626,7 +738,7 @@ fn spawn_wave(
             _ => (world.w as f32 - 4.0, rng.f32() * world.h as f32),
         };
         let c = world.nav.cell_of(x, y);
-        let Some(c) = world.nav.nearest_walkable(c) else {
+        let Some(c) = world.nearest_spawnable(c) else {
             continue;
         };
         let (wx, wy) = world.nav.centre(c);
@@ -665,17 +777,16 @@ fn spawn_supplies(
     let kinds = [SupplyKind::Medkit, SupplyKind::Ammo, SupplyKind::Recruit];
     let kind = kinds[rng.range(kinds.len())];
     let pos = if world.pois.is_empty() {
-        // fall back to a random walkable spot
+        // fall back to a random open spot
         let c = (
             (rng.f32() * world.nav.w as f32) as i32,
             (rng.f32() * world.nav.h as f32) as i32,
         );
-        world.nav.nearest_walkable(c).map(|c| world.nav.centre(c))
+        world.nearest_spawnable(c).map(|c| world.nav.centre(c))
     } else {
         let (x, y, _) = world.pois[rng.range(world.pois.len())];
         world
-            .nav
-            .nearest_walkable(world.nav.cell_of(x, y))
+            .nearest_spawnable(world.nav.cell_of(x, y))
             .map(|c| world.nav.centre(c))
     };
     let Some((x, y)) = pos else { return };

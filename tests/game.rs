@@ -318,3 +318,67 @@ fn alerts_merge_decay_and_query() {
 fn bevy_math_vec(x: f32, y: f32) -> bevy::math::Vec2 {
     bevy::math::Vec2::new(x, y)
 }
+
+#[test]
+fn paths_keep_clearance_in_open_streets() {
+    // synthetic: 40×40, one 12×12 building; the path around it must not touch
+    // tight cells (adjacent to walls) since there is plenty of room
+    let (w, h) = (40u32, 40u32);
+    let mut blocked = vec![false; (w * h) as usize];
+    for y in 14..26 {
+        for x in 14..26 {
+            blocked[(y * w + x) as usize] = true;
+        }
+    }
+    let g = NavGrid::from_blocked(w, h, &blocked);
+    let path = g.path((4.0, 20.0), (36.0, 20.0)).expect("path");
+    let mut prev = (4.0, 20.0);
+    for wp in &path {
+        // sample the polyline: every cell it crosses must be non-tight
+        let steps = 20;
+        for i in 0..=steps {
+            let t = i as f32 / steps as f32;
+            let p = (prev.0 + (wp.0 - prev.0) * t, prev.1 + (wp.1 - prev.1) * t);
+            let c = g.cell_of(p.0, p.1);
+            let idx = g.idx(c.0, c.1).unwrap();
+            assert!(!g.tight[idx], "path scrapes a wall at {p:?}");
+        }
+        prev = *wp;
+    }
+}
+
+#[test]
+fn narrow_corridor_still_passable() {
+    // a 3px door is the only way through a full-width wall
+    let (w, h) = (30u32, 20u32);
+    let mut blocked = vec![false; (w * h) as usize];
+    for y in 0..h {
+        if !(9..12).contains(&y) {
+            blocked[(y * w + 15) as usize] = true;
+            blocked[(y * w + 16) as usize] = true;
+        }
+    }
+    let g = NavGrid::from_blocked(w, h, &blocked);
+    let path = g
+        .path((4.0, 10.0), (26.0, 10.0))
+        .expect("path through the door");
+    let end = path.last().unwrap();
+    assert!((end.0 - 26.0).abs() < 3.0);
+}
+
+#[test]
+fn squad_reaches_ordered_goal() {
+    let (mean, max) = mapgenart::game::run_goal_sim(&cfg(&[]), 2500).unwrap();
+    assert!(mean < 8.0, "mean distance to goal {mean:.1}px");
+    assert!(max < 20.0, "worst straggler {max:.1}px from goal");
+}
+
+#[test]
+fn squad_reaches_goal_in_sf_streets() {
+    let mut c = sf_cfg();
+    c.width = 1024;
+    c.enterable = true;
+    let (mean, max) = mapgenart::game::run_goal_sim(&c, 4000).unwrap();
+    assert!(mean < 12.0, "mean distance to goal {mean:.1}px");
+    assert!(max < 40.0, "worst straggler {max:.1}px from goal");
+}
