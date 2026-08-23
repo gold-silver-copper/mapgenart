@@ -28,6 +28,12 @@ pub struct Assignment {
     pub color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Optional fill pattern: "hatch" (diagonal lines) or "dots".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+    /// Second colour used by `pattern` (hex; defaults to a darkened fill).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern_color: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -86,6 +92,86 @@ impl Scenario {
         let e = self.regions.entry(id.to_string()).or_default();
         e.color = Some(palette::to_hex(colour));
     }
+
+    /// Assign a region (by id) to an owner, clearing any per-region colour so
+    /// the owner colour shows. Returns the previous assignment.
+    pub fn assign_owner(&mut self, id: i64, owner: Option<&str>) -> Assignment {
+        let e = self.regions.entry(id.to_string()).or_default();
+        let prev = e.clone();
+        e.owner = owner.map(str::to_string);
+        e.color = None;
+        prev
+    }
+
+    /// The owner a region resolves to (id first, then name).
+    pub fn owner_of(&self, id: i64, name: Option<&str>) -> Option<&str> {
+        self.assignment(id, name).and_then(|a| a.owner.as_deref())
+    }
+
+    /// Set / change an owner's colour.
+    pub fn set_owner_colour(&mut self, owner: &str, colour: Rgba) {
+        self.owners
+            .insert(owner.to_string(), palette::to_hex(colour));
+    }
+
+    pub fn owner_colour(&self, owner: &str) -> Option<Rgba> {
+        self.owners
+            .get(owner)
+            .and_then(|c| palette::parse_hex(c).ok())
+    }
+
+    /// Merge `other` over `self` (later wins per key).
+    pub fn merge(&mut self, other: Scenario) {
+        self.owners.extend(other.owners);
+        self.regions.extend(other.regions);
+    }
+
+    /// Load and merge several scenario files in order.
+    pub fn load_all(paths: &[std::path::PathBuf]) -> Result<Scenario> {
+        let mut out = Scenario::default();
+        for p in paths {
+            if p.exists() {
+                out.merge(Scenario::load(p)?);
+            } else {
+                log::info!(
+                    "scenario {} does not exist yet; starting empty",
+                    p.display()
+                );
+            }
+        }
+        Ok(out)
+    }
+
+    /// Pattern for a region, if any: (kind, colour).
+    pub fn pattern_for(&self, id: i64, name: Option<&str>) -> Option<(Pattern, Rgba)> {
+        let a = self.assignment(id, name)?;
+        let kind = match a.pattern.as_deref()? {
+            "hatch" => Pattern::Hatch,
+            "dots" => Pattern::Dots,
+            other => {
+                log::warn!("unknown pattern `{other}`");
+                return None;
+            }
+        };
+        let base = self.colour_for(id, name);
+        let colour = a
+            .pattern_color
+            .as_deref()
+            .and_then(|c| palette::parse_hex(c).ok())
+            .unwrap_or([
+                (base[0] as u32 * 3 / 4) as u8,
+                (base[1] as u32 * 3 / 4) as u8,
+                (base[2] as u32 * 3 / 4) as u8,
+                255,
+            ]);
+        Some((kind, colour))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pattern {
+    Hatch,
+    Dots,
 }
 
 #[cfg(test)]

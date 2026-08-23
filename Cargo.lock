@@ -3317,6 +3317,7 @@ dependencies = [
  "serde_json",
  "toml 0.8.23",
  "ureq",
+ "web-sys",
  "winit",
 ]
 

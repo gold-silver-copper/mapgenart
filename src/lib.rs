@@ -1,7 +1,9 @@
 #![allow(clippy::type_complexity)]
 
 pub mod config;
+pub mod font;
 pub mod generate;
+pub mod labels;
 pub mod land;
 pub mod osm;
 pub mod palette;

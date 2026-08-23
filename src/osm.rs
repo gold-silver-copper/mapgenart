@@ -12,6 +12,7 @@ use std::path::PathBuf;
 /// rule, so multipolygon inner rings (islands in lakes, courtyards) just work.
 #[derive(Debug, Clone)]
 pub enum Geometry {
+    Point([f64; 2]),
     Line(Vec<[f64; 2]>),
     Polygon(Vec<Vec<[f64; 2]>>),
 }
@@ -41,6 +42,9 @@ pub enum Kind {
     BorderLocal,
     BorderRegion,
     BorderCountry,
+    // labelled points
+    City,
+    Town,
 }
 
 #[derive(Debug, Clone)]
@@ -150,6 +154,12 @@ pub fn build_query(bbox: &BBox, cfg: &MapConfig, metres_per_pixel: f64) -> Strin
     if cfg.buildings && detail.buildings {
         line(r#"way["building"]({{bbox}});"#);
     }
+    if metres_per_pixel < 800.0 {
+        line(r#"node["place"="city"]({{bbox}});"#);
+    }
+    if metres_per_pixel < 120.0 {
+        line(r#"node["place"="town"]({{bbox}});"#);
+    }
     let levels = if detail.local_borders {
         "^(2|3|4|6|8)$"
     } else {
@@ -178,6 +188,17 @@ pub type Progress<'a> = &'a (dyn Fn(String) + Sync);
 /// Fetch raw Overpass JSON for every tile of the bbox. Returns one JSON string
 /// per tile (from `--input`, the cache, or the network).
 pub fn load_tiles(cfg: &MapConfig, bbox: &BBox, progress: Progress) -> Result<Vec<String>> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        // No filesystem or blocking HTTP on the web build: render the bundled
+        // demo fixture (central Copenhagen harbour).
+        let _ = (bbox, &cfg.input);
+        progress("Loading bundled demo data …".into());
+        return Ok(vec![
+            include_str!("../tests/fixtures/small.json").to_string(),
+        ]);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     if let Some(path) = &cfg.input {
         progress(format!("reading {}", path.display()));
         let s = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -299,11 +320,15 @@ pub fn parse_many(jsons: &[String]) -> Result<Vec<Feature>> {
     let mut nodes: HashMap<i64, [f64; 2]> = HashMap::new();
     let mut ways: HashMap<i64, &Element> = HashMap::new();
     let mut relations: HashMap<i64, &Element> = HashMap::new();
+    let mut points: HashMap<i64, &Element> = HashMap::new();
     for e in responses.iter().flat_map(|r| r.elements.iter()) {
         match e.ty.as_str() {
             "node" => {
                 if let (Some(lat), Some(lon)) = (e.lat, e.lon) {
                     nodes.insert(e.id, [lon, lat]);
+                    if !e.tags.is_empty() {
+                        points.insert(e.id, e);
+                    }
                 }
             }
             "way" => {
@@ -329,6 +354,24 @@ pub fn parse_many(jsons: &[String]) -> Result<Vec<Feature>> {
     };
 
     let mut out = Vec::new();
+
+    let mut point_els: Vec<&Element> = points.into_values().collect();
+    point_els.sort_by_key(|e| e.id);
+    for e in point_els {
+        let kind = match e.tags.get("place").map(String::as_str) {
+            Some("city") => Kind::City,
+            Some("town") => Kind::Town,
+            _ => continue,
+        };
+        if e.tags.contains_key("name") {
+            out.push(Feature::new(
+                kind,
+                Geometry::Point([e.lon.unwrap(), e.lat.unwrap()]),
+                e.id,
+                &e.tags,
+            ));
+        }
+    }
 
     for w in ways.values() {
         if w.tags.is_empty() {
