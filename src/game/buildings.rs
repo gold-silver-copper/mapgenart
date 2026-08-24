@@ -5,6 +5,31 @@
 use crate::generate::Generated;
 use crate::raster::layer;
 
+/// A carved opening in a building wall.
+#[derive(Debug, Clone)]
+pub struct Opening {
+    pub kind: OpeningKind,
+    /// map-pixel centre of the opening
+    pub centre: (f32, f32),
+    /// the wall pixels that were removed (doors) or made see-through (windows)
+    pub pixels: Vec<usize>,
+    /// interior component this opening belongs to
+    pub interior: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpeningKind {
+    Door,
+    Window,
+}
+
+/// One building interior (loot site).
+#[derive(Debug, Clone)]
+pub struct Interior {
+    pub centroid: (f32, f32),
+    pub pixels: usize,
+}
+
 /// Result of carving: masks the game world is built from.
 pub struct Carved {
     /// blocks movement (walls minus doors; water added by the world builder)
@@ -14,6 +39,10 @@ pub struct Carved {
     pub doors: usize,
     pub windows: usize,
     pub interiors: usize,
+    /// per-pixel interior component id (u32::MAX = not indoors)
+    pub indoor_id: Vec<u32>,
+    pub interior_list: Vec<Interior>,
+    pub openings: Vec<Opening>,
 }
 
 const DOOR_HALF: i32 = 2; // carve radius → doors ≈5 px wide (nav-safe)
@@ -121,6 +150,7 @@ pub fn carve(g: &mut Generated) -> Carved {
     let mut windows = 0usize;
     let mut door_px: Vec<usize> = Vec::new();
     let mut window_px: Vec<usize> = Vec::new();
+    let mut openings: Vec<Opening> = Vec::new();
 
     for (comp, cands) in candidates.iter().enumerate() {
         if cands.is_empty() {
@@ -146,6 +176,7 @@ pub fn carve(g: &mut Generated) -> Carved {
             doors += 1;
             // carve along the wall tangent (perpendicular to the through axis)
             let (tx, ty) = (*dy, *dx);
+            let mut removed = Vec::new();
             for t in -DOOR_HALF..=DOOR_HALF {
                 for u in -2..=2 {
                     // small cross section to break 2px-thick corner walls too
@@ -155,9 +186,16 @@ pub fn carve(g: &mut Generated) -> Carved {
                         walls[i] = false;
                         sight[i] = false;
                         door_px.push(i);
+                        removed.push(i);
                     }
                 }
             }
+            openings.push(Opening {
+                kind: OpeningKind::Door,
+                centre: (*px as f32, *py as f32),
+                pixels: removed,
+                interior: comp as u32,
+            });
         }
         // windows on remaining wall candidates, spaced out
         for (px, py, _, _) in cands {
@@ -168,6 +206,12 @@ pub fn carve(g: &mut Generated) -> Carved {
                 sight[i] = false;
                 windows += 1;
                 window_px.push(i);
+                openings.push(Opening {
+                    kind: OpeningKind::Window,
+                    centre: (*px as f32, *py as f32),
+                    pixels: vec![i],
+                    interior: comp as u32,
+                });
             }
         }
     }
@@ -198,6 +242,21 @@ pub fn carve(g: &mut Generated) -> Carved {
     }
 
     g.rendered.building = walls.clone();
+    let interior_list: Vec<Interior> = components
+        .iter()
+        .map(|members| {
+            let (mut sx, mut sy) = (0.0f64, 0.0f64);
+            for &i in members {
+                sx += (i as i32 % w) as f64;
+                sy += (i as i32 / w) as f64;
+            }
+            let n = members.len().max(1) as f64;
+            Interior {
+                centroid: ((sx / n) as f32, (sy / n) as f32),
+                pixels: members.len(),
+            }
+        })
+        .collect();
     log::info!(
         "buildings: {} interiors, {doors} doors, {windows} windows",
         components.len()
@@ -208,6 +267,9 @@ pub fn carve(g: &mut Generated) -> Carved {
         doors,
         windows,
         interiors: components.len(),
+        indoor_id: label,
+        interior_list,
+        openings,
     }
 }
 

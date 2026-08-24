@@ -3,8 +3,11 @@
 //! drops, fog updates and win/lose. No rendering types in here — the same
 //! systems drive the window build and `--sim-ticks` headless runs.
 
+use super::economy::Stockpile;
 use super::fog::Fog;
 use super::nav::FlowField;
+use super::population::Noise;
+use super::tuning;
 use super::units::*;
 use super::world::GameWorld;
 use avian2d::prelude::*;
@@ -16,11 +19,11 @@ pub struct LogicPlugin;
 impl Plugin for LogicPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Score>()
-            .init_resource::<WaveState>()
             .init_resource::<SimRng>()
             .init_resource::<SquadBuffs>()
             .init_resource::<Alerts>()
             .add_message::<TracerFx>()
+            .add_message::<DeathFeed>()
             .add_message::<GameOver>()
             .add_systems(
                 Update,
@@ -32,7 +35,7 @@ impl Plugin for LogicPlugin {
                     soldier_combat,
                     medic_heal,
                     resolve_deaths,
-                    wave_director,
+                    tick_clock,
                     pickups,
                     fog_update,
                 )
@@ -45,28 +48,16 @@ impl Plugin for LogicPlugin {
 // ---------------------------------------------------------------------------
 // Resources / events
 
+/// Run statistics (shown on the victory / defeat screen).
 #[derive(Resource, Default)]
 pub struct Score {
     pub kills: u32,
-    pub waves_survived: u32,
-}
-
-#[derive(Resource)]
-pub struct WaveState {
-    pub wave: u32,
-    /// time until the next wave while between waves; None while a wave is live
-    pub countdown: Option<Timer>,
-    pub alive: u32,
-}
-
-impl Default for WaveState {
-    fn default() -> Self {
-        WaveState {
-            wave: 0,
-            countdown: Some(Timer::from_seconds(6.0, TimerMode::Once)),
-            alive: 0,
-        }
-    }
+    pub shots: u32,
+    pub victory: bool,
+    pub fallen: Vec<String>,
+    pub barricades_built: u32,
+    pub loudest: f32,
+    pub time: f32,
 }
 
 /// Squad-wide pickups.
@@ -172,8 +163,11 @@ pub struct TracerFx {
 
 #[derive(Message)]
 pub struct GameOver {
-    pub kills: u32,
-    pub waves: u32,
+    pub victory: bool,
+}
+
+fn tick_clock(time: Res<Time>, mut score: ResMut<Score>) {
+    score.time += time.delta_secs();
 }
 
 /// Marks damage for the flash effect.
@@ -357,7 +351,7 @@ fn enemy_perception(
     mut alerts: ResMut<Alerts>,
     mut tracer_noise: MessageReader<TracerFx>,
     soldiers: Query<&Transform, With<Soldier>>,
-    mut enemies: Query<(&mut Enemy, &Transform)>,
+    mut enemies: Query<(&mut Enemy, &Transform), Without<Dormant>>,
 ) {
     alerts.decay(time.delta_secs());
     // gunfire is loud
@@ -564,16 +558,26 @@ fn enemy_ai(
 // ---------------------------------------------------------------------------
 // Combat
 
+#[allow(clippy::too_many_arguments)]
 fn soldier_combat(
     time: Res<Time>,
     world: Res<GameWorld>,
     buffs: Res<SquadBuffs>,
+    mut stock: ResMut<Stockpile>,
+    mut score: ResMut<Score>,
     mut commands: Commands,
     mut tracers: MessageWriter<TracerFx>,
-    mut soldiers: Query<(&mut Soldier, &Orders, &Transform, &mut LinearVelocity)>,
+    mut noise: MessageWriter<Noise>,
+    mut soldiers: Query<(
+        &mut Soldier,
+        Option<&mut Dossier>,
+        &Orders,
+        &Transform,
+        &mut LinearVelocity,
+    )>,
     mut enemies: Query<(Entity, &Transform, &mut Health), With<Enemy>>,
 ) {
-    for (mut s, orders, tf, mut vel) in &mut soldiers {
+    for (mut s, dossier, orders, tf, mut vel) in &mut soldiers {
         s.cooldown.tick(time.delta());
         if s.stats.damage <= 0.0 {
             continue;
@@ -583,12 +587,23 @@ fn soldier_combat(
         if moving_freely {
             continue; // plain move: don't stop to shoot
         }
+        let ammo_cost = match s.class {
+            Class::Gunner => tuning::AMMO_GUNNER,
+            _ => tuning::AMMO_RIFLE,
+        };
+        let dry = stock.ammo < ammo_cost;
+        // out of ammo: bayonets — short range, weak, quiet
+        let range = if dry {
+            tuning::BAYONET_RANGE
+        } else {
+            s.stats.range
+        };
         let (sx, sy) = world.to_map(pos);
         let mut best: Option<(Entity, Vec2, f32)> = None;
         for (ent, etf, _) in &enemies {
             let ep = etf.translation.truncate();
             let d = pos.distance(ep);
-            if d > s.stats.range {
+            if d > range {
                 continue;
             }
             let (ex, ey) = world.to_map(ep);
@@ -607,11 +622,44 @@ fn soldier_combat(
             vel.0 = Vec2::ZERO;
             if s.cooldown.is_finished() {
                 s.cooldown.reset();
+                let (dmg_mult, noise_mult) = dossier
+                    .as_ref()
+                    .map(|d| (d.damage_mult(), d.noise_mult()))
+                    .unwrap_or((1.0, 1.0));
+                let base = if dry {
+                    tuning::BAYONET_DAMAGE
+                } else {
+                    s.stats.damage
+                };
+                let damage = buffs.damage(base) * dmg_mult;
+                let loud = match s.class {
+                    Class::Gunner => tuning::NOISE_GUNNER,
+                    _ => tuning::NOISE_RIFLE,
+                };
+                let radius = if dry {
+                    tuning::NOISE_MELEE
+                } else {
+                    loud * noise_mult
+                };
+                if !dry {
+                    stock.ammo -= ammo_cost;
+                    score.shots += 1;
+                }
+                noise.write(Noise { pos, radius });
+                score.loudest = score.loudest.max(radius);
+                let mut killed = false;
                 if let Ok((_, _, mut hp)) = enemies.get_mut(ent) {
-                    hp.hp -= buffs.damage(s.stats.damage);
+                    hp.hp -= damage;
+                    killed = hp.hp <= 0.0;
                     commands
                         .entity(ent)
                         .insert(Hurt(Timer::from_seconds(0.1, TimerMode::Once)));
+                }
+                if let Some(mut d) = dossier {
+                    d.shots += 1;
+                    if killed {
+                        d.kills += 1;
+                    }
                 }
                 tracers.write(TracerFx {
                     from: pos,
@@ -625,6 +673,7 @@ fn soldier_combat(
 
 fn medic_heal(
     time: Res<Time>,
+    mut stock: ResMut<Stockpile>,
     mut tracers: MessageWriter<TracerFx>,
     mut q: Query<(&Soldier, &Transform)>,
     mut wounded: Query<(&Soldier, &Transform, &mut Health)>,
@@ -641,7 +690,13 @@ fn medic_heal(
         let pos = tf.translation.truncate();
         for (mp, range, heal) in &medics {
             if mp.distance(pos) <= *range {
-                hp.hp = (hp.hp + heal * time.delta_secs()).min(hp.max);
+                let healed = (heal * time.delta_secs()).min(hp.max - hp.hp);
+                let cost = healed * tuning::MEDS_PER_HP;
+                if stock.meds < cost {
+                    break;
+                }
+                stock.meds -= cost;
+                hp.hp = (hp.hp + healed).min(hp.max);
                 if (hp.hp - hp.max).abs() > 1.0 && (time.elapsed_secs() * 2.0).fract() < 0.1 {
                     tracers.write(TracerFx {
                         from: *mp,
@@ -655,20 +710,23 @@ fn medic_heal(
     }
 }
 
+/// A soldier fell (shown as a feed line by the HUD).
+#[derive(Message)]
+pub struct DeathFeed(pub String);
+
 #[allow(clippy::too_many_arguments)]
 fn resolve_deaths(
     mut commands: Commands,
     mut score: ResMut<Score>,
-    mut wave: ResMut<WaveState>,
     mut over: MessageWriter<GameOver>,
+    mut feed: MessageWriter<DeathFeed>,
     sheets: Option<Res<SpriteSheets>>,
     enemies: Query<(Entity, &Transform, &Health), With<Enemy>>,
-    soldiers: Query<(Entity, &Health), With<Soldier>>,
+    soldiers: Query<(Entity, &Health, Option<&Dossier>), With<Soldier>>,
 ) {
     for (ent, tf, hp) in &enemies {
         if hp.hp <= 0.0 {
             score.kills += 1;
-            wave.alive = wave.alive.saturating_sub(1);
             let mut c = commands.spawn((
                 Corpse {
                     timer: Timer::from_seconds(15.0, TimerMode::Once),
@@ -682,175 +740,20 @@ fn resolve_deaths(
         }
     }
     let mut any_alive = false;
-    for (ent, hp) in &soldiers {
+    for (ent, hp, dossier) in &soldiers {
         if hp.hp <= 0.0 {
+            if let Some(d) = dossier {
+                score.fallen.push(format!("{} — {} kills", d.name, d.kills));
+                feed.write(DeathFeed(format!("☠ {} — {} kills", d.name, d.kills)));
+            }
             commands.entity(ent).despawn();
         } else {
             any_alive = true;
         }
     }
     if !any_alive && soldiers.iter().count() > 0 {
-        // all remaining are dead this frame
-        over.write(GameOver {
-            kills: score.kills,
-            waves: score.waves_survived,
-        });
-    } else if !any_alive && score.kills > 0 {
-        over.write(GameOver {
-            kills: score.kills,
-            waves: score.waves_survived,
-        });
+        over.write(GameOver { victory: false });
     }
-}
-
-// ---------------------------------------------------------------------------
-// Waves & supplies
-
-#[allow(clippy::too_many_arguments)]
-fn wave_director(
-    time: Res<Time>,
-    mut commands: Commands,
-    mut wave: ResMut<WaveState>,
-    mut score: ResMut<Score>,
-    mut rng: ResMut<SimRng>,
-    mut alerts: ResMut<Alerts>,
-    world: Res<GameWorld>,
-    sheets: Option<Res<SpriteSheets>>,
-    soldiers: Query<&Transform, With<Soldier>>,
-    enemies: Query<(), With<Enemy>>,
-) {
-    let live = enemies.iter().count() as u32;
-    wave.alive = live;
-    match &mut wave.countdown {
-        Some(t) => {
-            t.tick(time.delta());
-            if t.just_finished() {
-                wave.wave += 1;
-                let n = 6 + wave.wave * 5;
-                let hp = 26.0 * 1.12f32.powi(wave.wave as i32 - 1);
-                let speed = (16.0 + wave.wave as f32 * 1.2).min(34.0);
-                let damage = 6.0 + wave.wave as f32 * 0.8;
-                let spawned = spawn_wave(
-                    &mut commands,
-                    sheets.as_deref(),
-                    &world,
-                    &mut rng,
-                    &mut alerts,
-                    &soldiers,
-                    n,
-                    hp,
-                    speed,
-                    damage,
-                );
-                log::info!("wave {}: {spawned} enemies (hp {hp:.0})", wave.wave);
-                wave.countdown = None;
-            }
-        }
-        None => {
-            if live == 0 {
-                score.waves_survived = wave.wave;
-                wave.countdown = Some(Timer::from_seconds(10.0, TimerMode::Once));
-                spawn_supplies(&mut commands, sheets.as_deref(), &world, &mut rng);
-            }
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn spawn_wave(
-    commands: &mut Commands,
-    sheets: Option<&SpriteSheets>,
-    world: &GameWorld,
-    rng: &mut SimRng,
-    alerts: &mut Alerts,
-    soldiers: &Query<&Transform, With<Soldier>>,
-    n: u32,
-    hp: f32,
-    speed: f32,
-    damage: f32,
-) -> u32 {
-    let squad: Vec<Vec2> = soldiers.iter().map(|t| t.translation.truncate()).collect();
-    // seed a couple of noisy "scent" alerts so the flow field routes the
-    // horde roughly toward the squad without perfect knowledge
-    if !squad.is_empty() {
-        let centroid = squad.iter().copied().sum::<Vec2>() / squad.len() as f32;
-        for _ in 0..3 {
-            let noise = Vec2::new(rng.f32() - 0.5, rng.f32() - 0.5) * 140.0;
-            alerts.push(centroid + noise);
-        }
-    }
-    let mut spawned = 0;
-    let mut guard = 0;
-    while spawned < n && guard < n * 50 {
-        guard += 1;
-        // random point along a random edge, nudged inward until walkable
-        let (mut x, mut y) = match rng.range(4) {
-            0 => (rng.f32() * world.w as f32, 3.0),
-            1 => (rng.f32() * world.w as f32, world.h as f32 - 4.0),
-            2 => (3.0, rng.f32() * world.h as f32),
-            _ => (world.w as f32 - 4.0, rng.f32() * world.h as f32),
-        };
-        let c = world.nav.cell_of(x, y);
-        let Some(c) = world.nearest_spawnable(c) else {
-            continue;
-        };
-        let (wx, wy) = world.nav.centre(c);
-        x = wx;
-        y = wy;
-        let pos = world.to_world(x, y);
-        if squad.iter().any(|s| s.distance(pos) < 90.0) {
-            continue; // don't spawn on top of the squad
-        }
-        // the horde smells the living: a rough (noisy) idea of the squad
-        let centroid = squad.iter().copied().sum::<Vec2>() / squad.len().max(1) as f32;
-        let noise = Vec2::new(rng.f32() - 0.5, rng.f32() - 0.5) * 160.0;
-        let jitter = 0.8 + rng.f32() * 0.45;
-        let a = rng.f32() * std::f32::consts::TAU;
-        spawn_enemy(
-            commands,
-            sheets,
-            pos,
-            hp,
-            speed * jitter,
-            damage,
-            Some(centroid + noise),
-            Vec2::new(a.cos(), a.sin()),
-        );
-        spawned += 1;
-    }
-    spawned
-}
-
-fn spawn_supplies(
-    commands: &mut Commands,
-    sheets: Option<&SpriteSheets>,
-    world: &GameWorld,
-    rng: &mut SimRng,
-) {
-    let kinds = [SupplyKind::Medkit, SupplyKind::Ammo, SupplyKind::Recruit];
-    let kind = kinds[rng.range(kinds.len())];
-    let pos = if world.pois.is_empty() {
-        // fall back to a random open spot
-        let c = (
-            (rng.f32() * world.nav.w as f32) as i32,
-            (rng.f32() * world.nav.h as f32) as i32,
-        );
-        world.nearest_spawnable(c).map(|c| world.nav.centre(c))
-    } else {
-        let (x, y, _) = world.pois[rng.range(world.pois.len())];
-        world
-            .nearest_spawnable(world.nav.cell_of(x, y))
-            .map(|c| world.nav.centre(c))
-    };
-    let Some((x, y)) = pos else { return };
-    let mut e = commands.spawn((
-        SupplyDrop { kind },
-        Transform::from_translation(world.to_world(x, y).extend(3.0)),
-    ));
-    if let Some(sheets) = sheets {
-        e.insert(Sprite::from_image(sheets.supply.clone()));
-    }
-    log::info!("supply drop ({kind:?}) at map ({x:.0},{y:.0})");
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -858,6 +761,8 @@ fn pickups(
     mut commands: Commands,
     world: Res<GameWorld>,
     mut buffs: ResMut<SquadBuffs>,
+    mut stock: ResMut<Stockpile>,
+    mut rng: ResMut<SimRng>,
     sheets: Option<Res<SpriteSheets>>,
     drops: Query<(Entity, &SupplyDrop, &Transform)>,
     mut soldiers: Query<(&Transform, &mut Health), With<Soldier>>,
@@ -878,13 +783,23 @@ fn pickups(
             }
             SupplyKind::Ammo => buffs.damage_mult += 0.15,
             SupplyKind::Recruit => {
+                if stock.scrap < 12.0 {
+                    continue; // can't afford the gear yet — the drop waits
+                }
+                stock.scrap -= 12.0;
                 let spawn = dp + Vec2::new(6.0, 0.0);
                 let spawn = if world.walkable_world(spawn) {
                     spawn
                 } else {
                     dp
                 };
-                spawn_soldier(&mut commands, sheets.as_deref(), Class::Rifleman, spawn);
+                let e = spawn_soldier(&mut commands, sheets.as_deref(), Class::Rifleman, spawn);
+                let (a, b) = (rng.next(), rng.next());
+                commands.entity(e).insert(Dossier {
+                    name: soldier_name(a, b),
+                    kills: 0,
+                    shots: 0,
+                });
             }
         }
         commands.entity(ent).despawn();
@@ -907,6 +822,7 @@ fn fog_update(
     time: Res<Time>,
     mut timer: Local<FogTimer>,
     mut world: ResMut<GameWorld>,
+    daynight: Option<Res<super::DayNight>>,
     soldiers: Query<&Transform, With<Soldier>>,
 ) {
     timer.0.tick(time.delta());
@@ -917,8 +833,12 @@ fn fog_update(
         .iter()
         .map(|t| world.to_map(t.translation.truncate()))
         .collect();
+    let vision = match daynight.as_deref() {
+        Some(d) if d.is_night => VISION_RADIUS * tuning::NIGHT_VISION_MULT,
+        _ => VISION_RADIUS,
+    };
     let world = &mut *world;
     let sight = std::mem::take(&mut world.sight_blocked);
-    world.fog.update(&sight, &viewers, VISION_RADIUS);
+    world.fog.update(&sight, &viewers, vision);
     world.sight_blocked = sight;
 }

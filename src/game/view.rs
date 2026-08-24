@@ -3,10 +3,13 @@
 //! F12 screenshots. Kept apart from `logic` so headless runs skip it all.
 
 use super::control::{BoxSelect, Paused};
-use super::logic::{Score, SquadBuffs, TracerFx, WaveState};
+use super::economy::Stockpile;
+use super::logic::{DeathFeed, Score, TracerFx};
+use super::objectives::Objectives;
+use super::population::NoiseMeter;
 use super::units::*;
 use super::world::{GameWorld, StaticWorld};
-use super::{MapLoad, Phase};
+use super::{DayNight, MapLoad, Phase};
 use crate::config::MapConfig;
 use crate::generate::Generated;
 use crate::raster::Canvas;
@@ -44,6 +47,10 @@ impl Plugin for ViewPlugin {
                     minimap_click,
                     screenshot_key,
                     pause_menu,
+                    barricade_repaint,
+                    night_tint,
+                    objective_markers,
+                    name_labels,
                 )
                     .run_if(in_state(Phase::Playing).and_then(resource_exists::<GameWorld>)),
             )
@@ -63,6 +70,13 @@ struct MapVisual;
 #[derive(Resource)]
 struct FogOverlay {
     image: Handle<Image>,
+}
+
+/// Map texture handle + original pixels under built barricades.
+#[derive(Resource)]
+struct MapImage {
+    handle: Handle<Image>,
+    saved: std::collections::HashMap<usize, Vec<(usize, [u8; 4])>>,
 }
 
 #[derive(Resource)]
@@ -113,6 +127,10 @@ pub fn spawn_map_visuals(
     images: &mut Assets<Image>,
 ) {
     let map = image_from_canvas(images, &g.composed);
+    commands.insert_resource(MapImage {
+        handle: map.clone(),
+        saved: Default::default(),
+    });
     commands.spawn((
         Sprite::from_image(map),
         Transform::from_xyz(0.0, 0.0, 0.0),
@@ -188,6 +206,9 @@ fn cleanup_session(
     commands.remove_resource::<GameWorld>();
     commands.remove_resource::<FogOverlay>();
     commands.remove_resource::<Minimap>();
+    commands.remove_resource::<MapImage>();
+    commands.remove_resource::<super::economy::LootSites>();
+    commands.remove_resource::<super::objectives::Objectives>();
     for mut tf in &mut cam {
         *tf = Transform::IDENTITY;
     }
@@ -227,7 +248,7 @@ fn menu_ui(mut commands: Commands, cfg: Res<MapConfig>, font: Res<UiFont>) {
     let root = centre_column(&mut commands);
     commands.entity(root).with_children(|ui| {
         ui.spawn(text(&font, "LAST LIGHT", 52.0));
-        ui.spawn(text(&font, "real-time tactics on real-world ruins", 16.0));
+        ui.spawn(text(&font, "the city sleeps. loot it quietly, reach the evac, get out.", 16.0));
         ui.spawn(text(&font, &format!("map: {}", cfg.bbox), 14.0));
         ui.spawn(text(&font, "", 8.0));
         ui.spawn(text(&font, "Enter – deploy the squad", 20.0));
@@ -266,14 +287,34 @@ fn loading_status(load: Res<MapLoad>, mut q: Query<&mut Text, With<HudText>>) {
 
 fn game_over_ui(mut commands: Commands, score: Option<Res<Score>>, font: Res<UiFont>) {
     let root = centre_column(&mut commands);
-    let (kills, waves) = score.map(|s| (s.kills, s.waves_survived)).unwrap_or((0, 0));
     commands.entity(root).with_children(|ui| {
-        ui.spawn(text(&font, "THE LIGHT GOES OUT", 44.0));
-        ui.spawn(text(
-            &font,
-            &format!("waves survived: {waves} · kills: {kills}"),
-            20.0,
-        ));
+        let (title, sub) = match score.as_ref().map(|s| s.victory) {
+            Some(true) => ("EXTRACTED", "the squad made it out"),
+            _ => ("THE LIGHT GOES OUT", "no one is coming"),
+        };
+        ui.spawn(text(&font, title, 44.0));
+        ui.spawn(text(&font, sub, 15.0));
+        if let Some(s) = &score {
+            ui.spawn(text(
+                &font,
+                &format!(
+                    "{}:{:02} survived · {} kills · {} shots · {} barricades · loudest {:.0}",
+                    s.time as u32 / 60,
+                    s.time as u32 % 60,
+                    s.kills,
+                    s.shots,
+                    s.barricades_built,
+                    s.loudest
+                ),
+                17.0,
+            ));
+            if !s.fallen.is_empty() {
+                ui.spawn(text(&font, "the fallen:", 14.0));
+                for f in s.fallen.iter().take(10) {
+                    ui.spawn(text(&font, f, 13.0));
+                }
+            }
+        }
         ui.spawn(text(&font, "R – try again · M – menu", 16.0));
     });
 }
@@ -290,7 +331,7 @@ fn game_over_input(keys: Res<ButtonInput<KeyCode>>, mut next: ResMut<NextState<P
 // ---------------------------------------------------------------------------
 // HUD
 
-const CONTROLS: [(&str, &str); 16] = [
+const CONTROLS: [(&str, &str); 17] = [
     ("left click / drag", "select soldier / box-select"),
     ("shift + click / drag", "add to selection"),
     ("ctrl + click", "select all of that class on screen"),
@@ -298,6 +339,10 @@ const CONTROLS: [(&str, &str); 16] = [
     ("right click", "move (formation) / attack-move an enemy"),
     ("A + left click", "attack-move"),
     ("S / H / P + click", "stop / hold position / patrol"),
+    (
+        "B + click opening",
+        "board up a door/window (again: tear down)",
+    ),
     ("ctrl + 1-9", "assign control group"),
     ("1-9 (double-tap)", "recall group (centre camera)"),
     ("middle-mouse drag", "pan the map"),
@@ -407,31 +452,73 @@ fn hud_ui(mut commands: Commands, font: Res<UiFont>) {
 #[allow(clippy::too_many_arguments)]
 fn hud_update(
     score: Res<Score>,
-    wave: Res<WaveState>,
-    buffs: Res<SquadBuffs>,
+    stock: Res<Stockpile>,
+    noise: Res<NoiseMeter>,
+    daynight: Option<Res<DayNight>>,
+    objectives: Res<Objectives>,
+    mut feed: MessageReader<DeathFeed>,
+    time: Res<Time>,
+    mut feed_line: Local<Option<(String, f32)>>,
     soldiers: Query<&Health, With<Soldier>>,
-    enemies: Query<(), With<Enemy>>,
+    awake: Query<(), (With<Enemy>, Without<super::units::Dormant>)>,
     selected: Query<(), (With<Soldier>, With<Selected>)>,
     mut q: Query<&mut Text, With<HudText>>,
 ) {
+    for d in feed.read() {
+        *feed_line = Some((d.0.clone(), time.elapsed_secs()));
+    }
+    if let Some((_, t0)) = *feed_line
+        && time.elapsed_secs() - t0 > 6.0
+    {
+        *feed_line = None;
+    }
     let squad = soldiers.iter().count();
     let hp: f32 = soldiers.iter().map(|h| h.hp).sum();
-    let next = match &wave.countdown {
-        Some(t) => format!(
-            "next wave in {:.0}s",
-            (t.duration() - t.elapsed()).as_secs_f32()
-        ),
-        None => format!("{} hostiles", enemies.iter().count()),
+    let dial = match daynight.as_deref() {
+        Some(d) if d.is_night => "☾ night",
+        _ => "☀ day",
     };
+    let noise_bar = match noise.0 as u32 {
+        0 => "quiet",
+        1..=25 => "low",
+        26..=60 => "LOUD",
+        _ => "DEAFENING",
+    };
+    let objective = objectives
+        .current()
+        .map(|o| {
+            let what = match o.kind {
+                super::objectives::ObjectiveKind::Search => "search",
+                super::objectives::ObjectiveKind::Extract => "extract:",
+            };
+            if objectives.alarm_fired && !o.done {
+                format!(
+                    "{what} {} — hold {:.0}s",
+                    o.name,
+                    (super::tuning::EXTRACT_HOLD_S - objectives.hold).max(0.0)
+                )
+            } else {
+                format!("{what} {}", o.name)
+            }
+        })
+        .unwrap_or_else(|| "extract!".into());
     for mut t in &mut q {
-        t.0 = format!(
-            "wave {} · {next} · squad {squad} ({:.0} hp) · {} selected · kills {} · dmg +{:.0}%",
-            wave.wave,
-            hp,
+        let mut line = format!(
+            "{dial} · {objective} · squad {squad} ({hp:.0} hp, {} sel) · ammo {:.0} · meds {:.0} · scrap {:.0} · noise {noise_bar} · kills {}",
             selected.iter().count(),
+            stock.ammo,
+            stock.meds,
+            stock.scrap,
             score.kills,
-            buffs.damage_mult * 100.0
         );
+        if stock.ammo < 30.0 {
+            line.push_str("  ⚠ LOW AMMO");
+        }
+        if let Some((f, _)) = &*feed_line {
+            line.push_str(&format!("   {f}"));
+        }
+        let _ = &awake;
+        t.0 = line;
     }
 }
 
@@ -691,5 +778,169 @@ fn screenshot_key(
         commands
             .spawn(Screenshot::primary_window())
             .observe(save_to_disk(path));
+    }
+}
+
+/// Repaint the map texture when barricades go up or come down.
+fn barricade_repaint(
+    world: Res<GameWorld>,
+    mut map: ResMut<MapImage>,
+    mut images: ResMut<Assets<Image>>,
+    mut msgs: MessageReader<super::barricade::RepaintFx>,
+) {
+    for m in msgs.read() {
+        let Some(op) = world.openings.get(m.opening) else {
+            continue;
+        };
+        let handle = map.handle.clone();
+        let Some(mut img) = images.get_mut(&handle) else {
+            continue;
+        };
+        let Some(data) = img.data.as_mut() else {
+            continue;
+        };
+        if m.built {
+            let mut saved = Vec::new();
+            for &i in &op.pixels {
+                let o = i * 4;
+                saved.push((i, [data[o], data[o + 1], data[o + 2], data[o + 3]]));
+                // plank brown
+                data[o] = 122;
+                data[o + 1] = 84;
+                data[o + 2] = 46;
+                data[o + 3] = 255;
+            }
+            map.saved.insert(m.opening, saved);
+        } else if let Some(saved) = map.saved.remove(&m.opening) {
+            for (i, px) in saved {
+                let o = i * 4;
+                data[o..o + 4].copy_from_slice(&px);
+            }
+        }
+    }
+}
+
+#[derive(Component)]
+struct NightShade;
+
+/// Blue-dark tint at night (between the map and the fog overlay).
+fn night_tint(
+    mut commands: Commands,
+    daynight: Option<Res<DayNight>>,
+    world: Res<GameWorld>,
+    mut shade: Query<&mut Sprite, With<NightShade>>,
+) {
+    let night = daynight.map(|d| d.is_night).unwrap_or(false);
+    let target = if night { 0.30 } else { 0.0 };
+    if let Ok(mut sp) = shade.single_mut() {
+        let a = sp.color.alpha();
+        sp.color.set_alpha(a + (target - a) * 0.02);
+    } else {
+        commands.spawn((
+            Sprite {
+                color: Color::srgba(0.05, 0.08, 0.25, 0.0),
+                custom_size: Some(Vec2::new(world.w as f32, world.h as f32)),
+                ..default()
+            },
+            Transform::from_xyz(0.0, 0.0, 9.0),
+            NightShade,
+            MapVisual,
+        ));
+    }
+}
+
+/// Flag ring on the current objective; an edge arrow when it's off-screen.
+fn objective_markers(
+    mut gizmos: Gizmos,
+    objectives: Res<super::objectives::Objectives>,
+    camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
+    window: Single<&Window, With<PrimaryWindow>>,
+    time: Res<Time>,
+) {
+    let Some(current) = objectives.current() else {
+        return;
+    };
+    let colour = match current.kind {
+        super::objectives::ObjectiveKind::Search => Color::srgb(0.4, 0.8, 1.0),
+        super::objectives::ObjectiveKind::Extract => Color::srgb(0.4, 1.0, 0.5),
+    };
+    let pulse = 1.0 + (time.elapsed_secs() * 3.0).sin() * 0.15;
+    let r = match current.kind {
+        super::objectives::ObjectiveKind::Extract => super::tuning::EXTRACT_RADIUS,
+        _ => super::tuning::MID_OBJECTIVE_RADIUS,
+    };
+    gizmos.circle_2d(Isometry2d::from_translation(current.pos), r * pulse, colour);
+    gizmos.circle_2d(Isometry2d::from_translation(current.pos), 1.5, colour);
+    // off-screen edge arrow
+    let (cam, cam_tf) = *camera;
+    if let Ok(screen) = cam.world_to_viewport(cam_tf, current.pos.extend(0.0)) {
+        let (w, h) = (window.width(), window.height());
+        if screen.x < 0.0 || screen.y < 0.0 || screen.x > w || screen.y > h {
+            let clamped = Vec2::new(
+                screen.x.clamp(30.0, w - 30.0),
+                screen.y.clamp(30.0, h - 30.0),
+            );
+            if let (Ok(a), Ok(b)) = (
+                cam.viewport_to_world_2d(cam_tf, clamped),
+                cam.viewport_to_world_2d(
+                    cam_tf,
+                    clamped + (screen - clamped).normalize_or_zero() * 14.0,
+                ),
+            ) {
+                gizmos.arrow_2d(a, b, colour);
+            }
+        }
+    }
+}
+
+#[derive(Component)]
+struct NameTag(Entity);
+
+/// Soldier names float above them when zoomed in close.
+#[allow(clippy::type_complexity)]
+fn name_labels(
+    mut commands: Commands,
+    font: Res<UiFont>,
+    cam: Single<&Transform, With<Camera2d>>,
+    soldiers: Query<(Entity, &Transform, &Dossier), With<Soldier>>,
+    mut tags: Query<
+        (Entity, &NameTag, &mut Transform, &mut Visibility),
+        (Without<Soldier>, Without<Camera2d>),
+    >,
+) {
+    let close = cam.scale.x < 0.55;
+    let mut have: std::collections::HashSet<Entity> = Default::default();
+    for (te, tag, mut ttf, mut vis) in &mut tags {
+        match soldiers.get(tag.0) {
+            Ok((_, stf, _)) => {
+                have.insert(tag.0);
+                ttf.translation =
+                    stf.translation.truncate().extend(20.0) + Vec3::new(0.0, 6.5, 0.0);
+                *vis = if close {
+                    Visibility::Visible
+                } else {
+                    Visibility::Hidden
+                };
+            }
+            Err(_) => commands.entity(te).despawn(),
+        }
+    }
+    if close {
+        for (se, stf, dossier) in &soldiers {
+            if !have.contains(&se) {
+                let rank = "|".repeat(dossier.rank() as usize);
+                commands.spawn((
+                    Text2d::new(format!("{} {rank}", dossier.name)),
+                    font.text_font(10.0),
+                    TextColor(Color::srgba(1.0, 1.0, 1.0, 0.85)),
+                    Transform::from_translation(
+                        stf.translation.truncate().extend(20.0) + Vec3::new(0.0, 6.5, 0.0),
+                    )
+                    .with_scale(Vec3::splat(0.16)),
+                    NameTag(se),
+                    MapVisual,
+                ));
+            }
+        }
     }
 }

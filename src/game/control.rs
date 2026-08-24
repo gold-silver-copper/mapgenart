@@ -68,6 +68,7 @@ pub enum PendingCommand {
     None,
     AttackMove,
     Patrol,
+    Barricade,
 }
 
 #[derive(Resource, Default)]
@@ -266,14 +267,17 @@ pub fn formation_offsets(n: usize) -> Vec<Vec2> {
 
 #[allow(clippy::too_many_arguments)]
 fn orders(
+    mut commands: Commands,
     buttons: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     window: Single<&Window, With<PrimaryWindow>>,
     camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
     world: Res<GameWorld>,
     paused: Res<Paused>,
+    barricades: Res<super::barricade::Barricades>,
     mut pending: ResMut<PendingCommand>,
     enemies: Query<(&Transform, &Visibility), With<super::units::Enemy>>,
+    selected_ents: Query<(Entity, &Transform), (With<Soldier>, With<Selected>)>,
     mut selected: Query<(&Transform, &mut Orders), (With<Soldier>, With<Selected>)>,
 ) {
     if paused.0 {
@@ -284,6 +288,9 @@ fn orders(
     }
     if keys.just_pressed(KeyCode::KeyP) {
         *pending = PendingCommand::Patrol;
+    }
+    if keys.just_pressed(KeyCode::KeyB) {
+        *pending = PendingCommand::Barricade;
     }
     if keys.just_pressed(KeyCode::KeyS) {
         for (_, mut o) in &mut selected {
@@ -320,6 +327,29 @@ fn orders(
         PendingCommand::None
     };
     *pending = PendingCommand::None;
+    if mode == PendingCommand::Barricade {
+        // find the door/window nearest to the click, send the closest soldier
+        let (tx, ty) = world.to_map(target);
+        let opening = world
+            .openings
+            .iter()
+            .enumerate()
+            .map(|(i, o)| (i, (o.centre.0 - tx).abs() + (o.centre.1 - ty).abs()))
+            .filter(|(_, d)| *d < 9.0)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i);
+        if let Some(idx) = opening
+            && let Some((soldier, _)) = selected_ents
+                .iter()
+                .map(|(e, tf)| (e, tf.translation.truncate().distance(target)))
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(e, _)| (e, ()))
+        {
+            let tear = barricades.0.get(idx).map(|b| b.is_some()).unwrap_or(false);
+            super::barricade::order(&mut commands, soldier, idx, tear);
+        }
+        return;
+    }
     let n = selected.iter().count();
     if n == 0 {
         return;
@@ -364,7 +394,7 @@ fn orders(
                     ..default()
                 };
             }
-            PendingCommand::None => {
+            PendingCommand::Barricade | PendingCommand::None => {
                 *o = Orders {
                     waypoints: path,
                     attack_move: false,

@@ -32,6 +32,7 @@ The first custom-bbox run fetches OSM from Overpass and caches it in
 | right click | move (formation) · on a visible enemy: attack-move |
 | `A` + left click | attack-move |
 | `S` / `H` / `P` + click | stop / hold position / patrol |
+| `B` + click a door/window | board it up (click a boarded one to tear down) |
 | Ctrl+`1`–`9` / `1`–`9` | assign / recall control group (double-tap: centre camera) |
 | middle-mouse drag | pan the map |
 | arrows / `W` `D` / screen edge / minimap click | pan camera |
@@ -42,11 +43,25 @@ The first custom-bbox run fetches OSM from Overpass and caches it in
 
 ### The game
 
-- Your squad (riflemen, gunners, a medic) spawns mid-map. Waves of infected
-  spawn at the map edges and hunt you down a Dijkstra **flow field**; each
-  wave is bigger, faster, tougher. Survive between waves to receive **supply
-  drops** at real POIs (hospitals, supermarkets): medkits, ammo (damage
-  buff), recruits.
+- **The city sleeps.** A fixed population of infected (~1000 in downtown SF)
+  lies dormant in buildings and streets. Gunfire wakes everything in
+  earshot; the woken shriek and wake more; sightings become shared alerts
+  the horde converges on down a Dijkstra **flow field**. Stay quiet, or
+  start a snowball you can't stop. Awake enemies that lose the trail calm
+  down by day — at night nothing calms and sleepers stir on their own.
+- **Reach the evac.** Every run picks real, named objectives from the map:
+  search a mid-point cache ("Sutter Fine Foods"), then reach the extraction
+  and hold it 60 s through the alarm it raises. Extract = victory screen
+  with the run's story; lose the squad = the light goes out.
+- **The guns are hungry.** Shots drain a squad ammo pool (empty = bayonets),
+  the medic burns meds, barricades and recruits cost scrap. Loot building
+  interiors (progress by standing inside; pharmacies and markets are rich,
+  sleepers lurk indoors) to stay supplied.
+- **Named soldiers.** Reyes "Ghost", 23 kills, ranks up: harder-hitting and
+  quieter. Death is permanent for the run; the fallen are listed at the end.
+- **Barricades.** `B` + click boards up a carved door or window (scrap,
+  hammering noise, enemies smash through given time) — turn any real
+  building into a last stand.
 - **Buildings are solid — and enterable.** Real footprints become walls with
   interior floors; procedural **doors** (≥1 per building where the street
   allows) and **windows** are carved deterministically. Walls are Avian

@@ -1,11 +1,16 @@
 //! "Last Light" — real-time tactics on OSM pixel-art maps. StarCraft-style
 //! squad control, hordes, fog of war; no base building.
 
+pub mod barricade;
 pub mod buildings;
 pub mod control;
+pub mod economy;
 pub mod fog;
 pub mod logic;
 pub mod nav;
+pub mod objectives;
+pub mod population;
+pub mod tuning;
 pub mod units;
 pub mod view;
 pub mod world;
@@ -15,6 +20,37 @@ use crate::generate::{self, Generated};
 use bevy::prelude::*;
 use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, channel};
+
+/// Run-long day/night clock.
+#[derive(Resource)]
+pub struct DayNight {
+    /// seconds into the current phase
+    pub t: f32,
+    pub is_night: bool,
+}
+
+impl Default for DayNight {
+    fn default() -> Self {
+        DayNight {
+            t: 0.0,
+            is_night: false,
+        }
+    }
+}
+
+fn day_night_clock(time: Res<Time>, mut dn: ResMut<DayNight>) {
+    dn.t += time.delta_secs();
+    let span = if dn.is_night {
+        tuning::NIGHT_S
+    } else {
+        tuning::DAY_S
+    };
+    if dn.t >= span {
+        dn.t = 0.0;
+        dn.is_night = !dn.is_night;
+        log::info!("{} falls", if dn.is_night { "night" } else { "day" });
+    }
+}
 
 #[derive(States, Default, Clone, Eq, PartialEq, Debug, Hash)]
 pub enum Phase {
@@ -34,6 +70,13 @@ impl Plugin for GamePlugin {
             .add_plugins(avian2d::PhysicsPlugins::default())
             .insert_resource(avian2d::prelude::Gravity(Vec2::ZERO))
             .add_plugins(logic::LogicPlugin)
+            .add_plugins((
+                population::PopulationPlugin,
+                economy::EconomyPlugin,
+                objectives::ObjectivesPlugin,
+                barricade::BarricadePlugin,
+            ))
+            .add_systems(Update, day_night_clock.run_if(in_state(Phase::Playing)))
             .add_plugins((control::ControlPlugin, view::ViewPlugin))
             .add_systems(OnEnter(Phase::Loading), start_load)
             .add_systems(Update, poll_load.run_if(in_state(Phase::Loading)))
@@ -140,7 +183,15 @@ pub fn setup_session(
     } else {
         None
     };
-    let world = world::build_world(commands, g, carved.map(|c| c.sight));
+    let mut world = world::build_world(commands, g, carved.as_ref().map(|c| c.sight.clone()));
+    let interiors = carved
+        .as_ref()
+        .map(|c| c.interior_list.clone())
+        .unwrap_or_default();
+    if let Some(c) = carved {
+        world.indoor_id = c.indoor_id;
+        world.openings = c.openings;
+    }
     // squad spawns around the centre of the map on walkable ground
     let centre = (world.w as f32 / 2.0, world.h as f32 / 2.0);
     let sheets = images.map(|mut images| {
@@ -158,6 +209,7 @@ pub fn setup_session(
         units::Class::Medic,
         units::Class::Rifleman,
     ];
+    let mut rng = logic::SimRng::default();
     'outer: for ring in 0..40i32 {
         for dy in -ring..=ring {
             for dx in -ring..=ring {
@@ -172,7 +224,14 @@ pub fn setup_session(
                 }
                 let (x, y) = world.nav.centre(cell);
                 let class = classes[(placed as usize) % classes.len()];
-                units::spawn_soldier(commands, sheets.as_ref(), class, world.to_world(x, y));
+                let e =
+                    units::spawn_soldier(commands, sheets.as_ref(), class, world.to_world(x, y));
+                let (a, b) = (rng.next(), rng.next());
+                commands.entity(e).insert(units::Dossier {
+                    name: units::soldier_name(a, b.wrapping_add(placed as u64)),
+                    kills: 0,
+                    shots: 0,
+                });
                 placed += 1;
                 if placed >= cfg.squad.max(1) {
                     break 'outer;
@@ -180,12 +239,33 @@ pub fn setup_session(
             }
         }
     }
+    // the sleeping city
+    let population = population::population_for(&world, cfg.population);
+    let seeded = population::seed(commands, sheets.as_ref(), &world, &mut rng, population);
+    log::info!("population: {seeded} sleepers seeded");
+    // loot + objectives
+    commands.insert_resource(economy::build_sites(&world, &interiors));
+    let spawn_world = world.to_world(centre.0, centre.1);
+    let objectives = objectives::choose(&world, spawn_world);
+    if let Some(o) = objectives.list.last() {
+        log::info!(
+            "extraction: {} at {:?} ({} objectives)",
+            o.name,
+            o.pos,
+            objectives.list.len()
+        );
+    }
+    commands.insert_resource(objectives);
+    commands.insert_resource(rng);
     if let Some(sheets) = sheets {
         commands.insert_resource(sheets);
     }
     commands.insert_resource(world);
     commands.insert_resource(logic::Score::default());
-    commands.insert_resource(logic::WaveState::default());
+    commands.insert_resource(barricade::Barricades::default());
+    commands.insert_resource(DayNight::default());
+    commands.insert_resource(population::NoiseMeter::default());
+    commands.insert_resource(economy::Stockpile::default());
     commands.insert_resource(logic::SquadBuffs::default());
     commands.insert_resource(logic::Alerts::default());
 }
@@ -199,10 +279,12 @@ fn watch_game_over(mut over: MessageReader<logic::GameOver>, mut next: ResMut<Ne
 // ---------------------------------------------------------------------------
 // Headless simulation (`--sim-ticks N`) and stress harness
 
-pub fn run_headless_sim(cfg: &MapConfig, ticks: u32) -> anyhow::Result<String> {
+/// Shared scaffold for all headless harnesses: minimal plugins + the full
+/// game logic stack, deterministic 16 ms virtual ticks, no rendering.
+/// Public so integration tests can drive custom scenarios.
+pub fn headless_app(cfg: &MapConfig) -> App {
     use bevy::app::ScheduleRunnerPlugin;
     use bevy::state::app::StatesPlugin;
-    let g = generate::generate(cfg)?;
     let mut app = App::new();
     app.add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(std::time::Duration::ZERO)))
         .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
@@ -215,7 +297,20 @@ pub fn run_headless_sim(cfg: &MapConfig, ticks: u32) -> anyhow::Result<String> {
         .insert_resource(cfg.clone())
         .add_plugins(avian2d::PhysicsPlugins::default())
         .insert_resource(avian2d::prelude::Gravity(Vec2::ZERO))
-        .add_plugins(logic::LogicPlugin);
+        .add_plugins(logic::LogicPlugin)
+        .add_plugins((
+            population::PopulationPlugin,
+            economy::EconomyPlugin,
+            objectives::ObjectivesPlugin,
+            barricade::BarricadePlugin,
+        ))
+        .add_systems(Update, day_night_clock);
+    app
+}
+
+pub fn run_headless_sim(cfg: &MapConfig, ticks: u32) -> anyhow::Result<String> {
+    let g = generate::generate(cfg)?;
+    let mut app = headless_app(cfg);
     {
         let mut g = g;
         let world_cell = app.world_mut();
@@ -245,7 +340,23 @@ pub fn run_headless_sim(cfg: &MapConfig, ticks: u32) -> anyhow::Result<String> {
     }
     let world = app.world_mut();
     let kills = world.resource::<logic::Score>().kills;
-    let wave_no = world.resource::<logic::WaveState>().wave;
+    let stock = {
+        let s = world.resource::<economy::Stockpile>();
+        (s.ammo as i32, s.meds as i32, s.scrap as i32)
+    };
+    let dormant = world
+        .query_filtered::<(), (
+            bevy::prelude::With<units::Enemy>,
+            bevy::prelude::With<units::Dormant>,
+        )>()
+        .iter(world)
+        .count();
+    let objective = {
+        let o = world.resource::<objectives::Objectives>();
+        o.current()
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| "extracted".into())
+    };
     let soldiers = world
         .query_filtered::<(), bevy::prelude::With<units::Soldier>>()
         .iter(world)
@@ -263,7 +374,8 @@ pub fn run_headless_sim(cfg: &MapConfig, ticks: u32) -> anyhow::Result<String> {
     let gw = world.resource::<world::GameWorld>();
     let stuck = positions.iter().filter(|p| !gw.walkable_world(**p)).count();
     Ok(format!(
-        "sim: {ticks} ticks, wave {wave_no}, {soldiers} soldiers ({stuck} in blocked cells), {enemies} enemies alive, {kills} kills"
+        "sim: {ticks} ticks, {soldiers} soldiers ({stuck} in blocked cells), {enemies} enemies ({dormant} dormant), {kills} kills, ammo {} meds {} scrap {}, objective: {objective}",
+        stock.0, stock.1, stock.2
     ))
 }
 
@@ -272,27 +384,12 @@ pub fn run_headless_sim(cfg: &MapConfig, ticks: u32) -> anyhow::Result<String> {
 /// Exercises A*, clearance, wall-slide and stuck-recovery end to end.
 pub fn run_goal_sim(cfg: &MapConfig, ticks: u32) -> anyhow::Result<(f32, f32)> {
     let debug = std::env::var("GOAL_DEBUG").is_ok();
-    // pathfinding harness: no enemy waves interfering
-    fn no_waves(mut wave: ResMut<logic::WaveState>) {
-        wave.countdown = Some(Timer::from_seconds(1.0e6, TimerMode::Once));
-    }
-    use bevy::app::ScheduleRunnerPlugin;
-    use bevy::state::app::StatesPlugin;
     let mut g = generate::generate(cfg)?;
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(std::time::Duration::ZERO)))
-        .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
-            std::time::Duration::from_millis(16),
-        ))
-        .add_plugins(bevy::transform::TransformPlugin)
-        .add_plugins(bevy::diagnostic::DiagnosticsPlugin)
-        .add_plugins(StatesPlugin)
-        .init_state::<Phase>()
-        .insert_resource(cfg.clone())
-        .add_plugins(avian2d::PhysicsPlugins::default())
-        .insert_resource(avian2d::prelude::Gravity(Vec2::ZERO))
-        .add_plugins(logic::LogicPlugin)
-        .add_systems(First, no_waves);
+    // pathfinding harness: an empty world (no sleepers interfering)
+    let mut cfg = cfg.clone();
+    cfg.population = Some(0);
+    let cfg = &cfg;
+    let mut app = headless_app(cfg);
     {
         let world_cell = app.world_mut();
         let mut queue = bevy::ecs::world::CommandQueue::default();
@@ -399,22 +496,8 @@ pub fn run_goal_sim(cfg: &MapConfig, ticks: u32) -> anyhow::Result<(f32, f32)> {
 /// spot and push them through the streets for `ticks`. Returns
 /// (units_in_blocked_cells, units_with_nan_positions).
 pub fn run_stress(cfg: &MapConfig, n: u32, ticks: u32) -> anyhow::Result<(usize, usize)> {
-    use bevy::app::ScheduleRunnerPlugin;
-    use bevy::state::app::StatesPlugin;
     let g = generate::generate(cfg)?;
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(std::time::Duration::ZERO)))
-        .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
-            std::time::Duration::from_millis(16),
-        ))
-        .add_plugins(bevy::transform::TransformPlugin)
-        .add_plugins(bevy::diagnostic::DiagnosticsPlugin)
-        .add_plugins(StatesPlugin)
-        .init_state::<Phase>()
-        .insert_resource(cfg.clone())
-        .add_plugins(avian2d::PhysicsPlugins::default())
-        .insert_resource(avian2d::prelude::Gravity(Vec2::ZERO))
-        .add_plugins(logic::LogicPlugin);
+    let mut app = headless_app(cfg);
     {
         let mut g = g;
         let world_cell = app.world_mut();

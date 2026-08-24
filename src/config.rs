@@ -195,6 +195,10 @@ pub struct MapConfig {
     /// (the game turns this on by default).
     #[arg(long)]
     pub enterable: bool,
+
+    /// Override the sleeping population size (default: scaled to map area).
+    #[arg(long)]
+    pub population: Option<u32>,
 }
 
 impl MapConfig {

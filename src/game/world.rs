@@ -30,8 +30,14 @@ pub struct GameWorld {
     pub main_region: Vec<bool>,
     pub flow: FlowField,
     pub fog: Fog,
-    /// supply-drop points of interest (hospitals, supermarkets) in map px
+    /// supply/loot points of interest (hospitals, supermarkets) in map px
     pub pois: Vec<(f32, f32, String)>,
+    /// named places (cities/towns) in map px
+    pub places: Vec<(f32, f32, String)>,
+    /// per-pixel interior component id (u32::MAX outdoors)
+    pub indoor_id: Vec<u32>,
+    /// carved doors/windows (barricade targets)
+    pub openings: Vec<super::buildings::Opening>,
     pub collider_count: usize,
 }
 
@@ -150,22 +156,25 @@ pub fn build_world(commands: &mut Commands, g: &Generated, sight: Option<Vec<boo
             StaticWorld,
         ));
     }
-    let pois = g
-        .features
-        .iter()
-        .filter_map(|f| match (&f.kind, &f.geom) {
-            (crate::osm::Kind::Poi, crate::osm::Geometry::Point(p)) => {
-                let px = g.rendered.proj.project(*p);
-                Some((
-                    px[0] as f32,
-                    px[1] as f32,
-                    f.name.clone().unwrap_or_default(),
-                ))
-            }
-            _ => None,
-        })
-        .filter(|(x, y, _)| *x >= 0.0 && *y >= 0.0 && *x < w as f32 && *y < h as f32)
-        .collect();
+    let point_features = |kinds: &[crate::osm::Kind]| -> Vec<(f32, f32, String)> {
+        g.features
+            .iter()
+            .filter_map(|f| match &f.geom {
+                crate::osm::Geometry::Point(p) if kinds.contains(&f.kind) => {
+                    let px = g.rendered.proj.project(*p);
+                    Some((
+                        px[0] as f32,
+                        px[1] as f32,
+                        f.name.clone().unwrap_or_default(),
+                    ))
+                }
+                _ => None,
+            })
+            .filter(|(x, y, _)| *x >= 0.0 && *y >= 0.0 && *x < w as f32 && *y < h as f32)
+            .collect()
+    };
+    let pois = point_features(&[crate::osm::Kind::Poi]);
+    let places = point_features(&[crate::osm::Kind::City, crate::osm::Kind::Town]);
     log::info!("game world: {}x{w}px, {} static colliders", h, rects.len());
     GameWorld {
         w,
@@ -177,6 +186,9 @@ pub fn build_world(commands: &mut Commands, g: &Generated, sight: Option<Vec<boo
         nav,
         fog: Fog::new(w, h),
         pois,
+        places,
+        indoor_id: vec![u32::MAX; (w * h) as usize],
+        openings: Vec::new(),
         collider_count: rects.len(),
     }
 }

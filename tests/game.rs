@@ -423,3 +423,221 @@ fn flow_field_avoids_wall_hugging() {
         "{tight_steps}/{steps} steps hugged the wall"
     );
 }
+
+// ---------------------------------------------------------------------------
+// milestone 4: noise world, economy, objectives, ranks, barricades, night
+
+use bevy::prelude::*;
+use mapgenart::game::units::{Dormant, Dossier, Enemy as EnemyC, Soldier as SoldierC};
+use mapgenart::game::{
+    economy, headless_app, objectives, population, setup_session, tuning, world::GameWorld,
+};
+
+fn game_app(extra: &[&str]) -> bevy::app::App {
+    let c = cfg(extra);
+    let mut g = generate::generate(&c).unwrap();
+    let mut app = headless_app(&c);
+    {
+        let world_cell = app.world_mut();
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let mut commands = bevy::ecs::system::Commands::new(&mut queue, world_cell);
+        setup_session(&mut commands, &c, &mut g, None);
+        queue.apply(app.world_mut());
+    }
+    app.finish();
+    app.cleanup();
+    app.update();
+    app
+}
+
+#[test]
+fn population_seeds_in_bounds_and_dormant_without_physics() {
+    let mut app = game_app(&["--population", "120"]);
+    let world = app.world_mut();
+    let dormant = world
+        .query_filtered::<&Transform, (With<EnemyC>, With<Dormant>)>()
+        .iter(world)
+        .map(|t| t.translation.truncate())
+        .collect::<Vec<_>>();
+    assert!(dormant.len() > 80, "{} sleepers", dormant.len());
+    // dormant = no colliders
+    let with_col = world
+        .query_filtered::<(), (
+            With<EnemyC>,
+            With<Dormant>,
+            With<avian2d::prelude::Collider>,
+        )>()
+        .iter(world)
+        .count();
+    assert_eq!(with_col, 0, "dormant enemies must carry no physics");
+    let gw = world.resource::<GameWorld>();
+    for p in &dormant {
+        let (x, y) = gw.to_map(*p);
+        assert!(x >= 0.0 && y >= 0.0 && x < gw.w as f32 && y < gw.h as f32);
+    }
+}
+
+fn sf_game_app(extra_pop: u32) -> bevy::app::App {
+    let mut c = sf_cfg();
+    c.width = 1024;
+    c.enterable = true;
+    c.population = Some(extra_pop);
+    let mut g = generate::generate(&c).unwrap();
+    let mut app = headless_app(&c);
+    {
+        let world_cell = app.world_mut();
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let mut commands = bevy::ecs::system::Commands::new(&mut queue, world_cell);
+        setup_session(&mut commands, &c, &mut g, None);
+        queue.apply(app.world_mut());
+    }
+    app.finish();
+    app.cleanup();
+    app.update();
+    app
+}
+
+#[test]
+fn one_shot_wakes_a_bounded_neighbourhood() {
+    let mut app = sf_game_app(600);
+    // a single noise event at the map centre
+    {
+        let world = app.world_mut();
+        let centre = {
+            let gw = world.resource::<GameWorld>();
+            gw.to_world(gw.w as f32 / 2.0, gw.h as f32 / 2.0)
+        };
+        world.write_message(population::Noise {
+            pos: centre,
+            radius: tuning::NOISE_RIFLE,
+        });
+    }
+    for _ in 0..3 {
+        app.update();
+    }
+    let world = app.world_mut();
+    let awake = world
+        .query_filtered::<(), (With<EnemyC>, Without<Dormant>)>()
+        .iter(world)
+        .count();
+    let total = world
+        .query_filtered::<(), With<EnemyC>>()
+        .iter(world)
+        .count();
+    assert!(awake > 0, "someone must hear a rifle shot at the centre");
+    assert!(
+        awake * 2 < total,
+        "one shot woke {awake}/{total} — chain must fall off"
+    );
+}
+
+#[test]
+fn objectives_reachable_and_ordered() {
+    let mut app = game_app(&[]);
+    let world = app.world_mut();
+    let squad0 = {
+        let mut q = world.query_filtered::<&Transform, With<SoldierC>>();
+        q.iter(world).next().unwrap().translation.truncate()
+    };
+    let obj = world.resource::<objectives::Objectives>();
+    assert!(!obj.list.is_empty());
+    let last = obj.list.last().unwrap();
+    assert_eq!(last.kind, objectives::ObjectiveKind::Extract);
+    let gw = world.resource::<GameWorld>();
+    let ex_d = last.pos.distance(squad0);
+    for o in &obj.list {
+        // every objective is reachable
+        let from = gw.to_map(squad0);
+        let to = gw.to_map(o.pos);
+        assert!(
+            gw.nav.path(from, to).is_some(),
+            "objective {} unreachable",
+            o.name
+        );
+        // mids lie nearer than the extraction
+        if o.kind == objectives::ObjectiveKind::Search {
+            assert!(o.pos.distance(squad0) < ex_d);
+        }
+    }
+}
+
+#[test]
+fn loot_respects_poi_richness() {
+    let mut app = sf_game_app(0);
+    let world = app.world_mut();
+    let sites = world.resource::<economy::LootSites>();
+    assert!(sites.0.len() > 50, "{} sites", sites.0.len());
+    let max = sites.0.iter().map(|s| s.total).fold(0.0f32, f32::max);
+    let min = sites.0.iter().map(|s| s.total).fold(f32::MAX, f32::min);
+    assert!(max > min * 2.0, "richness must vary (max {max}, min {min})");
+}
+
+#[test]
+fn ammo_drains_and_stays_nonnegative() {
+    let summary = mapgenart::game::run_headless_sim(&cfg(&["--population", "200"]), 2500).unwrap();
+    // "ammo N" from the summary line
+    let ammo: i32 = summary
+        .split("ammo ")
+        .nth(1)
+        .and_then(|s| s.split_whitespace().next())
+        .and_then(|s| s.parse().ok())
+        .unwrap();
+    assert!(ammo >= 0, "{summary}");
+    assert!(
+        ammo < tuning::START_AMMO as i32,
+        "no shots fired? {summary}"
+    );
+}
+
+#[test]
+fn ranks_and_names() {
+    let mut d = Dossier {
+        name: mapgenart::game::units::soldier_name(3, 7),
+        kills: 0,
+        shots: 0,
+    };
+    assert_eq!(d.rank(), 0);
+    d.kills = tuning::RANK_KILLS[0];
+    assert_eq!(d.rank(), 1);
+    d.kills = tuning::RANK_KILLS[2] + 5;
+    assert_eq!(d.rank(), 3);
+    assert!(d.damage_mult() > 1.2);
+    assert!(d.noise_mult() < 0.8);
+    assert_eq!(
+        mapgenart::game::units::soldier_name(3, 7),
+        mapgenart::game::units::soldier_name(3, 7)
+    );
+}
+
+#[test]
+fn barricade_blocks_and_reopens_nav() {
+    let mut app = game_app(&[]);
+    let world = app.world_mut();
+    // fixture has no carved openings (no buildings) — use SF instead if empty
+    let has_openings = !world.resource::<GameWorld>().openings.is_empty();
+    if !has_openings {
+        // build on the SF map
+        drop(app);
+        let mut app = sf_game_app(0);
+        let world = app.world_mut();
+        let mut gw = world.resource_mut::<GameWorld>();
+        let idx = gw
+            .openings
+            .iter()
+            .position(|o| o.kind == mapgenart::game::buildings::OpeningKind::Door)
+            .expect("a door");
+        let centre = gw.openings[idx].centre;
+        let cell = gw.nav.cell_of(centre.0, centre.1);
+        assert!(!gw.nav.is_blocked(cell.0, cell.1), "door cell open before");
+        mapgenart::game::barricade::set_masks(&mut gw, idx, true);
+        assert!(gw.nav.is_blocked(cell.0, cell.1), "boarded door blocks nav");
+        mapgenart::game::barricade::set_masks(&mut gw, idx, false);
+        assert!(!gw.nav.is_blocked(cell.0, cell.1), "torn down reopens");
+    }
+}
+
+#[test]
+fn night_doubles_wake_radius() {
+    assert_eq!(population::wake_mult(false), 1.0);
+    assert!(population::wake_mult(true) >= 1.9);
+}

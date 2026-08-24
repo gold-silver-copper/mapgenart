@@ -64,6 +64,73 @@ pub struct Soldier {
     pub cooldown: Timer,
 }
 
+/// Identity and service record (ranks make a soldier stronger and quieter).
+#[derive(Component)]
+pub struct Dossier {
+    pub name: String,
+    pub kills: u32,
+    pub shots: u32,
+}
+
+impl Dossier {
+    pub fn rank(&self) -> u32 {
+        crate::game::tuning::RANK_KILLS
+            .iter()
+            .filter(|k| self.kills >= **k)
+            .count() as u32
+    }
+    pub fn damage_mult(&self) -> f32 {
+        1.0 + self.rank() as f32 * crate::game::tuning::RANK_DAMAGE_BONUS
+    }
+    pub fn noise_mult(&self) -> f32 {
+        (1.0 - self.rank() as f32 * crate::game::tuning::RANK_NOISE_CUT).max(0.5)
+    }
+}
+
+/// Deterministic name generator (feed it SimRng values).
+pub fn soldier_name(a: u64, b: u64) -> String {
+    const FIRST: [&str; 24] = [
+        "Reyes",
+        "Okafor",
+        "Tran",
+        "Silva",
+        "Novak",
+        "Ito",
+        "Marsh",
+        "Duarte",
+        "Kim",
+        "Volkov",
+        "Ince",
+        "Baptiste",
+        "Haas",
+        "Oduya",
+        "Lindqvist",
+        "Marino",
+        "Sato",
+        "Kelly",
+        "Dube",
+        "Farah",
+        "Quinn",
+        "Aldana",
+        "Petrov",
+        "Nakamura",
+    ];
+    const NICK: [&str; 12] = [
+        "Ace", "Doc", "Flint", "Mole", "Patch", "Ghost", "Brick", "Swift", "Hawk", "Lucky", "Tiny",
+        "Rook",
+    ];
+    format!(
+        "{} \"{}\"",
+        FIRST[(a % 24) as usize],
+        NICK[(b % 12) as usize]
+    )
+}
+
+/// A sleeping enemy: no physics, no AI — just a body in the world until noise
+/// or sight wakes it.
+#[derive(Component)]
+pub struct Dormant;
+
 #[derive(Component)]
 pub struct Enemy {
     pub damage: f32,
@@ -291,6 +358,62 @@ pub fn spawn_soldier(
         e.insert(Sprite::from_image(img));
     }
     e.id()
+}
+
+/// A sleeping body: sprite only, no physics — woken via [`wake_enemy`].
+pub fn spawn_dormant(
+    commands: &mut Commands,
+    sheets: Option<&SpriteSheets>,
+    pos: Vec2,
+    hp: f32,
+    speed: f32,
+    damage: f32,
+) -> Entity {
+    let mut e = commands.spawn((
+        Enemy {
+            damage,
+            speed,
+            cooldown: Timer::from_seconds(0.8, TimerMode::Once),
+            alert: None,
+            wander: Vec2::ZERO,
+            wander_t: 2.0,
+            stuck_t: 0.0,
+            last_pos: Vec2::ZERO,
+            burst: Vec2::ZERO,
+            burst_t: 0.0,
+        },
+        Dormant,
+        Health { hp, max: hp },
+        Transform::from_translation(pos.extend(4.0)),
+        Visibility::Hidden,
+    ));
+    if let Some(sheets) = sheets {
+        e.insert(Sprite::from_image(sheets.enemy.clone()));
+    }
+    e.id()
+}
+
+/// Attach physics + AI to a dormant enemy (it wakes up).
+pub fn wake_enemy(commands: &mut Commands, entity: Entity) {
+    commands.entity(entity).remove::<Dormant>().insert((
+        RigidBody::Dynamic,
+        Collider::circle(ENEMY_RADIUS),
+        LockedAxes::ROTATION_LOCKED,
+        LinearDamping(8.0),
+        CollisionLayers::new(Layer::Enemy, [Layer::World, Layer::Unit, Layer::Enemy]),
+    ));
+}
+
+/// Strip physics from a calmed enemy (it goes back to sleep).
+pub fn sleep_enemy(commands: &mut Commands, entity: Entity) {
+    commands.entity(entity).insert(Dormant).remove::<(
+        RigidBody,
+        Collider,
+        LockedAxes,
+        LinearDamping,
+        CollisionLayers,
+        LinearVelocity,
+    )>();
 }
 
 #[allow(clippy::too_many_arguments)]
