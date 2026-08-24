@@ -86,7 +86,8 @@ pub fn seed(
         let hp = 26.0 + rng.f32() * 14.0;
         let speed = 15.0 + rng.f32() * 9.0;
         let damage = 6.0 + rng.f32() * 3.0;
-        spawn_dormant(commands, sheets, pos, hp, speed, damage);
+        let kind = EnemyKind::roll(rng.f32());
+        spawn_dormant(commands, sheets, pos, kind, hp, speed, damage);
         placed += 1;
     }
     placed
@@ -110,6 +111,10 @@ fn wake_radius_mult(dn: Option<&DayNight>) -> f32 {
     wake_mult(dn.map(|d| d.is_night).unwrap_or(false))
 }
 
+fn director_scale(d: Option<&super::director::Director>) -> f32 {
+    d.map(|d| d.wake_scale()).unwrap_or(1.0)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn wake_by_noise(
     mut commands: Commands,
@@ -117,18 +122,25 @@ fn wake_by_noise(
     mut meter: ResMut<NoiseMeter>,
     mut alerts: ResMut<Alerts>,
     daynight: Option<Res<DayNight>>,
-    dormant: Query<(Entity, &Transform), (With<Enemy>, With<Dormant>)>,
+    dormant: Query<(Entity, &Transform, &Enemy), With<Dormant>>,
+    director: Option<Res<super::director::Director>>,
     mut woken_shriek: Local<Vec<Vec2>>,
 ) {
-    let mult = wake_radius_mult(daynight.as_deref());
+    let night = daynight.as_deref().map(|d| d.is_night).unwrap_or(false);
+    let mult = wake_radius_mult(daynight.as_deref()) * director_scale(director.as_deref());
     woken_shriek.clear();
     for n in noise.read() {
         meter.0 = (meter.0 + n.radius * 0.35).min(100.0);
         alerts.push(n.pos);
-        for (ent, tf) in &dormant {
+        // runners only stir for loud noise (a rifle shot or more) or at night
+        let loud = n.radius >= NOISE_RIFLE * 0.9;
+        for (ent, tf, e) in &dormant {
+            if e.kind == EnemyKind::Runner && !loud && !night {
+                continue;
+            }
             let p = tf.translation.truncate();
             if p.distance(n.pos) <= n.radius * mult {
-                wake_enemy(&mut commands, ent);
+                wake_enemy(&mut commands, ent, e.kind);
                 commands.entity(ent).insert(CalmTimer(0.0));
                 woken_shriek.push(p);
             }
@@ -138,15 +150,16 @@ fn wake_by_noise(
     // wakes a bounded neighbourhood, not the whole map)
     for shriek in woken_shriek.iter() {
         alerts.push(*shriek);
-        for (ent, tf) in &dormant {
+        for (ent, tf, e) in &dormant {
             if tf.translation.truncate().distance(*shriek) <= SHRIEK_RADIUS * mult {
-                wake_enemy(&mut commands, ent);
+                wake_enemy(&mut commands, ent, e.kind);
                 commands.entity(ent).insert(CalmTimer(0.0));
             }
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn wake_by_sight(
     mut commands: Commands,
     world: Res<GameWorld>,
@@ -154,12 +167,17 @@ fn wake_by_sight(
     mut rng: ResMut<SimRng>,
     daynight: Option<Res<DayNight>>,
     soldiers: Query<&Transform, With<Soldier>>,
-    dormant: Query<(Entity, &Transform), (With<Enemy>, With<Dormant>)>,
+    dormant: Query<(Entity, &Transform, &Enemy), With<Dormant>>,
+    director: Option<Res<super::director::Director>>,
 ) {
-    let mult = wake_radius_mult(daynight.as_deref());
+    let mult = wake_radius_mult(daynight.as_deref()) * director_scale(director.as_deref());
     let night = daynight.map(|d| d.is_night).unwrap_or(false);
     let squad: Vec<Vec2> = soldiers.iter().map(|t| t.translation.truncate()).collect();
-    for (ent, tf) in &dormant {
+    for (ent, tf, e) in &dormant {
+        // runners sleep through daylight sightings
+        if e.kind == EnemyKind::Runner && !night {
+            continue;
+        }
         let p = tf.translation.truncate();
         let seen = squad.iter().any(|s| {
             s.distance(p) < DORMANT_SIGHT * mult
@@ -173,7 +191,7 @@ fn wake_by_sight(
         });
         let restless = night && rng.f32() < NIGHT_SELF_WAKE_P * time.delta_secs() * 60.0;
         if seen || restless {
-            wake_enemy(&mut commands, ent);
+            wake_enemy(&mut commands, ent, e.kind);
             commands.entity(ent).insert(CalmTimer(0.0));
         }
     }
@@ -184,17 +202,19 @@ fn calm_down(
     mut commands: Commands,
     time: Res<Time>,
     daynight: Option<Res<DayNight>>,
+    director: Option<Res<super::director::Director>>,
     mut awake: Query<(Entity, &Enemy, &mut CalmTimer), Without<Dormant>>,
 ) {
     if daynight.map(|d| d.is_night).unwrap_or(false) {
         return;
     }
+    let speed = director.map(|d| d.calm_scale()).unwrap_or(1.0);
     for (ent, e, mut calm) in &mut awake {
         if e.alert.is_some() {
             calm.0 = 0.0;
             continue;
         }
-        calm.0 += time.delta_secs();
+        calm.0 += time.delta_secs() * speed;
         if calm.0 > CALM_AFTER_S {
             sleep_enemy(&mut commands, ent);
         }

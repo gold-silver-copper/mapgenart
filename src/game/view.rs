@@ -27,6 +27,9 @@ impl Plugin for ViewPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(UiFontPlugin)
             .init_resource::<Tracers>()
+            .init_resource::<NoiseRings>()
+            .init_resource::<Decals>()
+            .init_resource::<Ghosts>()
             .add_systems(Startup, spawn_camera)
             .add_systems(OnEnter(Phase::Menu), (cleanup_session, menu_ui))
             .add_systems(Update, menu_input.run_if(in_state(Phase::Menu)))
@@ -51,6 +54,10 @@ impl Plugin for ViewPlugin {
                     night_tint,
                     objective_markers,
                     name_labels,
+                    enemy_frames,
+                    noise_rings,
+                    threat_edges,
+                    blood_decals,
                 )
                     .run_if(in_state(Phase::Playing).and_then(resource_exists::<GameWorld>)),
             )
@@ -95,6 +102,18 @@ struct HudText;
 
 #[derive(Resource, Default)]
 struct Tracers(Vec<(Vec2, Vec2, bool, f32)>);
+
+/// Expanding noise rings: (pos, radius, born).
+#[derive(Resource, Default)]
+struct NoiseRings(Vec<(Vec2, f32, f32)>);
+
+/// Blood decal bookkeeping (pixel indices in paint order, for the cap).
+#[derive(Resource, Default)]
+struct Decals(std::collections::VecDeque<usize>);
+
+/// Enemies seen recently: (pos, last seen) for minimap ghost blips.
+#[derive(Resource, Default)]
+struct Ghosts(std::collections::HashMap<Entity, (Vec2, f32)>);
 
 fn spawn_camera(mut commands: Commands) {
     commands.spawn((Camera2d, Msaa::Off));
@@ -331,7 +350,7 @@ fn game_over_input(keys: Res<ButtonInput<KeyCode>>, mut next: ResMut<NextState<P
 // ---------------------------------------------------------------------------
 // HUD
 
-const CONTROLS: [(&str, &str); 17] = [
+const CONTROLS: [(&str, &str); 18] = [
     ("left click / drag", "select soldier / box-select"),
     ("shift + click / drag", "add to selection"),
     ("ctrl + click", "select all of that class on screen"),
@@ -350,6 +369,7 @@ const CONTROLS: [(&str, &str); 17] = [
     ("wheel", "zoom to cursor"),
     ("minimap click", "jump the camera"),
     ("F12", "screenshot"),
+    ("- / + / M", "volume down / up / mute"),
     ("Esc", "cancel command / this menu"),
     ("M (game over)", "back to the main menu"),
 ];
@@ -456,6 +476,7 @@ fn hud_update(
     noise: Res<NoiseMeter>,
     daynight: Option<Res<DayNight>>,
     objectives: Res<Objectives>,
+    director: Option<Res<super::director::Director>>,
     mut feed: MessageReader<DeathFeed>,
     time: Res<Time>,
     mut feed_line: Local<Option<(String, f32)>>,
@@ -513,6 +534,14 @@ fn hud_update(
         );
         if stock.ammo < 30.0 {
             line.push_str("  ⚠ LOW AMMO");
+        }
+        if let Some(d) = director.as_deref() {
+            let bars = ((d.intensity / 100.0) * 8.0).round() as usize;
+            line.push_str(&format!(
+                " · tension [{}{}]",
+                "#".repeat(bars),
+                ".".repeat(8 - bars.min(8))
+            ));
         }
         if let Some((f, _)) = &*feed_line {
             line.push_str(&format!("   {f}"));
@@ -593,6 +622,14 @@ fn draw_gizmos(
             Color::srgb(1.0, 0.9, 0.4)
         };
         gizmos.line_2d(*from, *to, c);
+        if !heal {
+            // muzzle flash
+            gizmos.circle_2d(
+                Isometry2d::from_translation(*from),
+                1.6,
+                Color::srgb(1.0, 0.95, 0.6),
+            );
+        }
     }
     for (tf, hp, sel) in &soldiers {
         let p = tf.translation.truncate();
@@ -673,7 +710,9 @@ fn minimap_update(
     mut node: Query<Entity, (With<MinimapNode>, Without<ImageNode>)>,
     mut commands: Commands,
     soldiers: Query<&Transform, With<Soldier>>,
-    enemies: Query<(&Transform, &Visibility), With<Enemy>>,
+    enemies: Query<(Entity, &Transform, &Visibility, &Enemy)>,
+    rings: Res<NoiseRings>,
+    mut ghosts: ResMut<Ghosts>,
 ) {
     for e in &mut node {
         commands.entity(e).insert(ImageNode::new(mm.image.clone()));
@@ -716,9 +755,42 @@ fn minimap_update(
     for tf in &soldiers {
         blip(tf.translation.truncate(), [80, 255, 80, 255]);
     }
-    for (tf, vis) in &enemies {
+    let now = time.elapsed_secs();
+    for (ent, tf, vis, e) in &enemies {
         if *vis == Visibility::Visible {
-            blip(tf.translation.truncate(), [255, 60, 60, 255]);
+            let c = match e.kind {
+                super::units::EnemyKind::Shambler => [255, 60, 60, 255],
+                super::units::EnemyKind::Shrieker => [230, 230, 255, 255],
+                super::units::EnemyKind::Runner => [255, 140, 40, 255],
+                super::units::EnemyKind::Brute => [170, 20, 20, 255],
+            };
+            blip(tf.translation.truncate(), c);
+            ghosts.0.insert(ent, (tf.translation.truncate(), now));
+        }
+    }
+    // last-known ghost blips for enemies that slipped out of vision
+    ghosts
+        .0
+        .retain(|ent, (_, t)| now - *t < super::tuning::GHOST_BLIP_S && enemies.get(*ent).is_ok());
+    for (ent, (p, t)) in ghosts.0.iter() {
+        if enemies
+            .get(*ent)
+            .map(|(_, _, v, _)| *v != Visibility::Visible)
+            .unwrap_or(false)
+        {
+            let fade = (1.0 - (now - t) / super::tuning::GHOST_BLIP_S).clamp(0.0, 1.0);
+            blip(*p, [(120.0 + 100.0 * fade) as u8, 50, 50, 255]);
+        }
+    }
+    // recent noise events
+    for (p, r, born) in rings.0.iter() {
+        let age = now - born;
+        if age < 3.0 {
+            let k = (1.0 - age / 3.0).clamp(0.0, 1.0);
+            let (x, y) = world.to_map(*p);
+            let (x, y) = ((x / scale as f32) as i32, (y / scale as f32) as i32);
+            frame.set(x, y, [255, (200.0 * k) as u8, 60, 255]);
+            let _ = r;
         }
     }
     if let Some(mut img) = images.get_mut(&mm.image) {
@@ -943,4 +1015,198 @@ fn name_labels(
             }
         }
     }
+}
+
+/// Sleeping enemies lie slumped; woken ones stand up, flash a "!" and tint
+/// red while they're hunting.
+#[allow(clippy::type_complexity)]
+fn enemy_frames(
+    mut commands: Commands,
+    time: Res<Time>,
+    sheets: Res<SpriteSheets>,
+    mut gizmos: Gizmos,
+    mut enemies: Query<(
+        Entity,
+        &Enemy,
+        &Transform,
+        &mut Sprite,
+        &Visibility,
+        Option<&super::units::Dormant>,
+        Option<&mut super::units::JustWoke>,
+    )>,
+) {
+    let dt = time.delta_secs();
+    for (ent, e, tf, mut sprite, vis, dormant, woke) in &mut enemies {
+        let awake = dormant.is_none();
+        let want = sheets.enemy_sprite(e.kind, awake);
+        if sprite.image != want {
+            sprite.image = want;
+        }
+        sprite.color = if awake && e.alert.is_some() {
+            Color::srgb(1.0, 0.75, 0.75)
+        } else {
+            Color::WHITE
+        };
+        if let Some(mut w) = woke {
+            w.0 -= dt;
+            if w.0 <= 0.0 {
+                commands.entity(ent).remove::<super::units::JustWoke>();
+            } else if *vis == Visibility::Visible {
+                // "!" — a short vertical bar and a dot above the head
+                let p = tf.translation.truncate() + Vec2::new(0.0, e.kind.radius() + 2.5);
+                let c = Color::srgb(1.0, 0.9, 0.2);
+                gizmos.line_2d(p + Vec2::new(0.0, 1.0), p + Vec2::new(0.0, 3.5), c);
+                gizmos.line_2d(p, p + Vec2::new(0.0, 0.3), c);
+            }
+        }
+    }
+}
+
+/// Expanding, fading ring at every noise event's true radius — you see what
+/// you woke.
+fn noise_rings(
+    mut gizmos: Gizmos,
+    mut rings: ResMut<NoiseRings>,
+    mut noises: MessageReader<super::population::Noise>,
+    time: Res<Time>,
+) {
+    let now = time.elapsed_secs();
+    for n in noises.read() {
+        rings.0.push((n.pos, n.radius, now));
+        if rings.0.len() > 64 {
+            rings.0.remove(0);
+        }
+    }
+    rings.0.retain(|(_, _, born)| now - born < 1.2);
+    for (p, r, born) in rings.0.iter() {
+        let age = (now - born) / 1.2;
+        let radius = r * age.sqrt();
+        let alpha = (1.0 - age) * 0.6;
+        gizmos.circle_2d(
+            Isometry2d::from_translation(*p),
+            radius,
+            Color::srgba(1.0, 0.8, 0.3, alpha),
+        );
+    }
+}
+
+/// Red wedges on the screen edge where awake enemies approach from outside
+/// the view (strength by count).
+fn threat_edges(
+    mut gizmos: Gizmos,
+    camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
+    window: Single<&Window, With<PrimaryWindow>>,
+    time: Res<Time>,
+    awake: Query<(&Transform, &Enemy), Without<super::units::Dormant>>,
+) {
+    let (cam, cam_tf) = *camera;
+    let (w, h) = (window.width(), window.height());
+    // count by edge
+    let mut edges = [0usize; 4]; // left, right, top, bottom
+    for (tf, e) in &awake {
+        if e.alert.is_none() {
+            continue;
+        }
+        let Ok(s) = cam.world_to_viewport(cam_tf, tf.translation) else {
+            continue;
+        };
+        if s.x >= 0.0 && s.x <= w && s.y >= 0.0 && s.y <= h {
+            continue;
+        }
+        if s.x < 0.0 {
+            edges[0] += 1;
+        } else if s.x > w {
+            edges[1] += 1;
+        }
+        if s.y < 0.0 {
+            edges[2] += 1;
+        } else if s.y > h {
+            edges[3] += 1;
+        }
+    }
+    let pulse = 0.5 + 0.5 * (time.elapsed_secs() * 5.0).sin();
+    for (i, n) in edges.iter().enumerate() {
+        if *n == 0 {
+            continue;
+        }
+        let strength = (*n as f32 / 8.0).min(1.0);
+        let a = (0.25 + 0.6 * strength) * (0.6 + 0.4 * pulse);
+        let colour = Color::srgba(1.0, 0.15, 0.1, a);
+        // a short wedge (three lines) at the edge midpoint, in world coords
+        let mid = match i {
+            0 => Vec2::new(12.0, h / 2.0),
+            1 => Vec2::new(w - 12.0, h / 2.0),
+            2 => Vec2::new(w / 2.0, 12.0),
+            _ => Vec2::new(w / 2.0, h - 12.0),
+        };
+        let dir = match i {
+            0 => Vec2::new(-1.0, 0.0),
+            1 => Vec2::new(1.0, 0.0),
+            2 => Vec2::new(0.0, -1.0),
+            _ => Vec2::new(0.0, 1.0),
+        };
+        let len = 18.0 + 30.0 * strength;
+        let tip = mid + dir * 8.0;
+        let base_a = mid - dir * 6.0 + Vec2::new(-dir.y, dir.x) * len;
+        let base_b = mid - dir * 6.0 - Vec2::new(-dir.y, dir.x) * len;
+        if let (Ok(t), Ok(a2), Ok(b2)) = (
+            cam.viewport_to_world_2d(cam_tf, tip),
+            cam.viewport_to_world_2d(cam_tf, base_a),
+            cam.viewport_to_world_2d(cam_tf, base_b),
+        ) {
+            gizmos.line_2d(a2, t, colour);
+            gizmos.line_2d(b2, t, colour);
+            gizmos.line_2d(a2, b2, colour);
+        }
+    }
+}
+
+/// Hits leave a 3-pixel blood spatter on the map texture (capped; oldest
+/// fade back toward the ground colour).
+fn blood_decals(
+    world: Res<GameWorld>,
+    mut map: ResMut<MapImage>,
+    mut decals: ResMut<Decals>,
+    mut images: ResMut<Assets<Image>>,
+    mut tracers: MessageReader<TracerFx>,
+) {
+    let hits: Vec<Vec2> = tracers.read().filter(|t| !t.heal).map(|t| t.to).collect();
+    if hits.is_empty() {
+        return;
+    }
+    let handle = map.handle.clone();
+    let Some(mut img) = images.get_mut(&handle) else {
+        return;
+    };
+    let Some(data) = img.data.as_mut() else {
+        return;
+    };
+    let w = world.w as i32;
+    for hit in hits {
+        let (x, y) = world.to_map(hit);
+        let (x, y) = (x as i32, y as i32);
+        for (dx, dy) in [(0, 0), (1, 0), (0, 1)] {
+            let (px, py) = (x + dx, y + dy);
+            if px < 0 || py < 0 || px >= w || py >= world.h as i32 {
+                continue;
+            }
+            let i = (py * w + px) as usize;
+            let o = i * 4;
+            // dark red blend
+            data[o] = ((data[o] as u16 + 2 * 110) / 3) as u8;
+            data[o + 1] = ((data[o + 1] as u16 + 2 * 20) / 3) as u8;
+            data[o + 2] = ((data[o + 2] as u16 + 2 * 20) / 3) as u8;
+            decals.0.push_back(i);
+        }
+    }
+    // cap: fade the oldest toward grey-brown ground
+    while decals.0.len() > super::tuning::DECAL_CAP {
+        if let Some(i) = decals.0.pop_front() {
+            let o = i * 4;
+            data[o] = ((data[o] as u16 + 90) / 2) as u8;
+            data[o + 1] = ((data[o + 1] as u16 + 80) / 2) as u8;
+            data[o + 2] = ((data[o + 2] as u16 + 70) / 2) as u8;
+        }
+    }
+    map.saved.retain(|_, _| true);
 }

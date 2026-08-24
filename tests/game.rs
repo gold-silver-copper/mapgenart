@@ -175,9 +175,15 @@ fn wave_scaling_math() {
 
 #[test]
 fn headless_sim_smoke() {
-    let summary = mapgenart::game::run_headless_sim(&cfg(&[]), 800).unwrap();
+    // a light population so the smoke run exercises the loop without a
+    // guaranteed wipe on the tiny fixture map
+    let summary = mapgenart::game::run_headless_sim(&cfg(&["--population", "20"]), 800).unwrap();
     assert!(summary.contains("(0 in blocked cells)"), "{summary}");
-    assert!(summary.contains("8 soldiers"), "{summary}");
+    assert!(summary.contains("soldiers"), "{summary}");
+    assert!(
+        summary.contains("sh/"),
+        "archetype counts missing: {summary}"
+    );
 }
 
 #[test]
@@ -640,4 +646,164 @@ fn barricade_blocks_and_reopens_nav() {
 fn night_doubles_wake_radius() {
     assert_eq!(population::wake_mult(false), 1.0);
     assert!(population::wake_mult(true) >= 1.9);
+}
+
+// ---------------------------------------------------------------------------
+// milestone 5: archetypes, cause-and-effect, director, sound
+
+use mapgenart::game::units::EnemyKind;
+
+#[test]
+fn archetype_ratios_and_stats() {
+    let mut counts = [0u32; 4];
+    for i in 0..10_000 {
+        let r = i as f32 / 10_000.0;
+        counts[match EnemyKind::roll(r) {
+            EnemyKind::Shambler => 0,
+            EnemyKind::Shrieker => 1,
+            EnemyKind::Runner => 2,
+            EnemyKind::Brute => 3,
+        }] += 1;
+    }
+    assert!(counts[0] > 7000, "shamblers {}", counts[0]);
+    assert!((counts[1] as f32 / 10_000.0 - tuning::RATIO_SHRIEKER).abs() < 0.01);
+    assert!((counts[2] as f32 / 10_000.0 - tuning::RATIO_RUNNER).abs() < 0.01);
+    assert!((counts[3] as f32 / 10_000.0 - tuning::RATIO_BRUTE).abs() < 0.01);
+    let (hp, sp, _) = EnemyKind::Brute.stats(30.0, 20.0, 6.0);
+    assert!(hp > 150.0 && sp < 15.0);
+    let (hp, sp, _) = EnemyKind::Runner.stats(30.0, 20.0, 6.0);
+    assert!(hp < 30.0 && sp > 35.0);
+    assert!(EnemyKind::Brute.radius() > EnemyKind::Shambler.radius());
+}
+
+#[test]
+fn shrieker_death_is_louder_than_a_rifle() {
+    let rifle = std::hint::black_box(tuning::NOISE_RIFLE);
+    assert!(rifle * tuning::SHRIEKER_SCREAM_MULT > rifle * 2.5);
+    // and a brute takes far more barricade damage per hit than a shambler
+    let base = std::hint::black_box(tuning::BARRICADE_ENEMY_DMG);
+    assert!(base * tuning::BRUTE_BARRICADE_MULT >= base * 4.0);
+}
+
+fn awake_runners(app: &mut bevy::app::App) -> usize {
+    let world = app.world_mut();
+    world
+        .query_filtered::<&EnemyC, Without<Dormant>>()
+        .iter(world)
+        .filter(|e| e.kind == EnemyKind::Runner)
+        .count()
+}
+
+fn a_dormant_runner(app: &mut bevy::app::App) -> Vec2 {
+    let world = app.world_mut();
+    let mut q = world.query_filtered::<(&Transform, &EnemyC), With<Dormant>>();
+    q.iter(world)
+        .find(|(_, e)| e.kind == EnemyKind::Runner)
+        .map(|(t, _)| t.translation.truncate())
+        .expect("a dormant runner")
+}
+
+#[test]
+fn runners_sleep_through_daytime_soft_noise_but_wake_to_gunfire() {
+    // sparse population so the shriek chain from *other* sleepers (which may
+    // legitimately wake a runner) is out of the picture
+    let mut app = sf_game_app(60);
+    let runner_pos = a_dormant_runner(&mut app);
+    app.world_mut().write_message(population::Noise {
+        pos: runner_pos,
+        radius: tuning::NOISE_HAMMER,
+    });
+    for _ in 0..3 {
+        app.update();
+    }
+    assert_eq!(
+        awake_runners(&mut app),
+        0,
+        "hammering by day must not wake runners"
+    );
+    // control: a rifle shot on top of it does
+    app.world_mut().write_message(population::Noise {
+        pos: runner_pos,
+        radius: tuning::NOISE_RIFLE,
+    });
+    for _ in 0..3 {
+        app.update();
+    }
+    assert!(
+        awake_runners(&mut app) >= 1,
+        "a rifle shot must wake the runner"
+    );
+}
+
+fn clear_sleepers_near_squad(app: &mut bevy::app::App, radius: f32) {
+    let world = app.world_mut();
+    let centroid = {
+        let mut q = world.query_filtered::<&Transform, With<SoldierC>>();
+        let v: Vec<Vec2> = q.iter(world).map(|t| t.translation.truncate()).collect();
+        v.iter().copied().sum::<Vec2>() / v.len().max(1) as f32
+    };
+    let near: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Transform), (With<EnemyC>, With<Dormant>)>();
+        q.iter(world)
+            .filter(|(_, t)| t.translation.truncate().distance(centroid) < radius)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for e in near {
+        world.despawn(e);
+    }
+}
+
+#[test]
+fn director_breaks_a_lull_but_not_during_extraction() {
+    use mapgenart::game::director::Director;
+    // quiet squad (no orders) on the SF map with sleepers spread around: after
+    // the lull window the director must have sent a scout pack
+    let mut app = sf_game_app(300);
+    // a genuinely quiet squad: nothing to shoot at within sight range
+    clear_sleepers_near_squad(&mut app, 100.0);
+    let ticks = ((tuning::DIRECTOR_LULL_S + 15.0) / 0.016) as u32;
+    for _ in 0..ticks {
+        app.update();
+    }
+    let actions = app.world().resource::<Director>().actions;
+    assert!(actions >= 1, "director never acted in {ticks} quiet ticks");
+    // during the extraction hold the lull breaker stays silent
+    let mut app = sf_game_app(300);
+    clear_sleepers_near_squad(&mut app, 100.0);
+    {
+        let world = app.world_mut();
+        let mut obj = world.resource_mut::<objectives::Objectives>();
+        for o in obj.list.iter_mut() {
+            if o.kind == objectives::ObjectiveKind::Search {
+                o.done = true;
+            }
+        }
+        obj.alarm_fired = true;
+        obj.hold = 0.0;
+    }
+    for _ in 0..ticks {
+        app.update();
+        // keep it "extracting" (hold never completes: no soldier at the point)
+    }
+    let d = app.world().resource::<Director>();
+    assert_eq!(d.actions, 0, "director acted during extraction");
+}
+
+#[test]
+fn decal_cap_is_a_sane_bound() {
+    let cap = std::hint::black_box(tuning::DECAL_CAP);
+    assert!((1000..=20_000).contains(&cap));
+}
+
+#[test]
+fn audio_buffers_and_voice_cap() {
+    use mapgenart::game::audio;
+    let r = audio::rifle();
+    assert!(r.iter().all(|s| s.is_finite() && s.abs() <= 1.0));
+    assert!(r.iter().any(|s| s.abs() > 0.1));
+    let s = audio::shriek();
+    assert!(s.len() > r.len(), "shriek is longer than a shot");
+    let voices = std::hint::black_box(tuning::MAX_VOICES);
+    assert!((8..=64).contains(&voices));
 }

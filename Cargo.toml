@@ -38,6 +38,8 @@ bevy = { version = "0.19.0", default-features = false, features = [
     "ui",
     "png",
     "default_font",
+    "bevy_audio",
+    "wav",
 ] }
 avian2d = { version = "0.7", default-features = false, features = ["2d", "f32", "parry-f32"] }
 serde = { version = "1", features = ["derive"] }

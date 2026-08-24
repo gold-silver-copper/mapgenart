@@ -71,3 +71,44 @@ pub const NIGHT_WAKE_MULT: f32 = 2.0;
 /// chance per dormant enemy per second to self-wake at night
 pub const NIGHT_SELF_WAKE_P: f32 = 0.0035;
 pub const NIGHT_VISION_MULT: f32 = 0.85;
+
+/// --- enemy archetypes ---------------------------------------------------------
+/// seeding ratios (must sum ≤ 1; remainder are shamblers)
+pub const RATIO_SHRIEKER: f32 = 0.08;
+pub const RATIO_RUNNER: f32 = 0.12;
+pub const RATIO_BRUTE: f32 = 0.05;
+pub const SHRIEKER_HP: f32 = 12.0;
+pub const SHRIEKER_SPEED_MULT: f32 = 0.8;
+/// a dying shrieker screams this × rifle radius
+pub const SHRIEKER_SCREAM_MULT: f32 = 3.0;
+pub const RUNNER_HP_MULT: f32 = 0.6;
+pub const RUNNER_SPEED_MULT: f32 = 2.0;
+pub const RUNNER_CHASE_MULT: f32 = 2.0;
+pub const BRUTE_HP_MULT: f32 = 6.0;
+pub const BRUTE_SPEED_MULT: f32 = 0.6;
+pub const BRUTE_DAMAGE_MULT: f32 = 1.8;
+pub const BRUTE_BARRICADE_MULT: f32 = 5.0;
+pub const BRUTE_MASS: f32 = 6.0;
+/// bayonets do this fraction of damage to brutes
+pub const BRUTE_BAYONET_FACTOR: f32 = 0.25;
+
+/// --- director -------------------------------------------------------------------
+pub const DIRECTOR_LULL_S: f32 = 90.0;
+pub const DIRECTOR_COOLDOWN_S: f32 = 40.0;
+pub const DIRECTOR_SCOUT_MIN: u32 = 3;
+pub const DIRECTOR_SCOUT_MAX: u32 = 6;
+pub const DIRECTOR_SCOUT_NEAR: f32 = 120.0;
+pub const DIRECTOR_SCOUT_FAR: f32 = 200.0;
+pub const DIRECTOR_HIGH_INTENSITY: f32 = 60.0;
+pub const DIRECTOR_HIGH_FOR_S: f32 = 30.0;
+pub const DIRECTOR_RELIEF_S: f32 = 30.0;
+pub const DIRECTOR_PRENIGHT_S: f32 = 60.0;
+pub const INTENSITY_DECAY: f32 = 6.0;
+
+/// --- visuals --------------------------------------------------------------------
+pub const DECAL_CAP: usize = 4000;
+pub const GHOST_BLIP_S: f32 = 5.0;
+
+/// --- audio ------------------------------------------------------------------------
+pub const MAX_VOICES: usize = 24;
+pub const AUDIO_HEAR_RADIUS: f32 = 260.0;

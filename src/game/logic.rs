@@ -489,7 +489,13 @@ fn enemy_ai(
                 continue;
             }
             // close-range chase only when it can actually see the target
-            if d < ENEMY_CHASE {
+            // (runners commit from much further out)
+            let chase = if e.kind == EnemyKind::Runner {
+                ENEMY_CHASE * tuning::RUNNER_CHASE_MULT
+            } else {
+                ENEMY_CHASE
+            };
+            if d < chase {
                 let a = world.to_map(pos);
                 let b = world.to_map(t);
                 if Fog::line_of_sight(&world.sight_blocked, world.w, world.h, a, b) {
@@ -576,6 +582,7 @@ fn soldier_combat(
         &mut LinearVelocity,
     )>,
     mut enemies: Query<(Entity, &Transform, &mut Health), With<Enemy>>,
+    kinds: Query<&Enemy>,
 ) {
     for (mut s, dossier, orders, tf, mut vel) in &mut soldiers {
         s.cooldown.tick(time.delta());
@@ -649,6 +656,17 @@ fn soldier_combat(
                 score.loudest = score.loudest.max(radius);
                 let mut killed = false;
                 if let Ok((_, _, mut hp)) = enemies.get_mut(ent) {
+                    // bayonets barely scratch a brute
+                    let damage = if dry
+                        && kinds
+                            .get(ent)
+                            .map(|k| k.kind == EnemyKind::Brute)
+                            .unwrap_or(false)
+                    {
+                        damage * tuning::BRUTE_BAYONET_FACTOR
+                    } else {
+                        damage
+                    };
                     hp.hp -= damage;
                     killed = hp.hp <= 0.0;
                     commands
@@ -721,12 +739,20 @@ fn resolve_deaths(
     mut over: MessageWriter<GameOver>,
     mut feed: MessageWriter<DeathFeed>,
     sheets: Option<Res<SpriteSheets>>,
-    enemies: Query<(Entity, &Transform, &Health), With<Enemy>>,
+    mut noise: MessageWriter<Noise>,
+    enemies: Query<(Entity, &Transform, &Health, &Enemy)>,
     soldiers: Query<(Entity, &Health, Option<&Dossier>), With<Soldier>>,
 ) {
-    for (ent, tf, hp) in &enemies {
+    for (ent, tf, hp, e) in &enemies {
         if hp.hp <= 0.0 {
             score.kills += 1;
+            if e.kind == EnemyKind::Shrieker {
+                // its death scream wakes the block
+                noise.write(Noise {
+                    pos: tf.translation.truncate(),
+                    radius: tuning::NOISE_RIFLE * tuning::SHRIEKER_SCREAM_MULT,
+                });
+            }
             let mut c = commands.spawn((
                 Corpse {
                     timer: Timer::from_seconds(15.0, TimerMode::Once),

@@ -250,9 +250,15 @@ fn enemies_smash(
             if e.alert.is_none() {
                 continue;
             }
-            if etf.translation.truncate().distance(bpos) < 5.5 && e.cooldown.is_finished() {
+            let reach = 5.5 + e.kind.radius();
+            if etf.translation.truncate().distance(bpos) < reach && e.cooldown.is_finished() {
                 e.cooldown.reset();
-                b.hp -= BARRICADE_ENEMY_DMG;
+                let mult = if e.kind == super::units::EnemyKind::Brute {
+                    BRUTE_BARRICADE_MULT
+                } else {
+                    1.0
+                };
+                b.hp -= BARRICADE_ENEMY_DMG * mult;
                 if rng.f32() < 0.4 {
                     noise.write(Noise {
                         pos: bpos,

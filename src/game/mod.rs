@@ -1,9 +1,11 @@
 //! "Last Light" — real-time tactics on OSM pixel-art maps. StarCraft-style
 //! squad control, hordes, fog of war; no base building.
 
+pub mod audio;
 pub mod barricade;
 pub mod buildings;
 pub mod control;
+pub mod director;
 pub mod economy;
 pub mod fog;
 pub mod logic;
@@ -263,6 +265,7 @@ pub fn setup_session(
     commands.insert_resource(world);
     commands.insert_resource(logic::Score::default());
     commands.insert_resource(barricade::Barricades::default());
+    commands.insert_resource(director::Director::default());
     commands.insert_resource(DayNight::default());
     commands.insert_resource(population::NoiseMeter::default());
     commands.insert_resource(economy::Stockpile::default());
@@ -303,6 +306,7 @@ pub fn headless_app(cfg: &MapConfig) -> App {
             economy::EconomyPlugin,
             objectives::ObjectivesPlugin,
             barricade::BarricadePlugin,
+            director::DirectorPlugin,
         ))
         .add_systems(Update, day_night_clock);
     app
@@ -357,6 +361,23 @@ pub fn run_headless_sim(cfg: &MapConfig, ticks: u32) -> anyhow::Result<String> {
             .map(|c| c.name.clone())
             .unwrap_or_else(|| "extracted".into())
     };
+    let kinds = {
+        let mut n = [0usize; 4];
+        let mut q = world.query::<&units::Enemy>();
+        for e in q.iter(world) {
+            n[match e.kind {
+                units::EnemyKind::Shambler => 0,
+                units::EnemyKind::Shrieker => 1,
+                units::EnemyKind::Runner => 2,
+                units::EnemyKind::Brute => 3,
+            }] += 1;
+        }
+        format!("{}sh/{}sk/{}ru/{}br", n[0], n[1], n[2], n[3])
+    };
+    let director = {
+        let d = world.resource::<director::Director>();
+        format!("intensity {:.0} ({} actions)", d.intensity, d.actions)
+    };
     let soldiers = world
         .query_filtered::<(), bevy::prelude::With<units::Soldier>>()
         .iter(world)
@@ -374,7 +395,7 @@ pub fn run_headless_sim(cfg: &MapConfig, ticks: u32) -> anyhow::Result<String> {
     let gw = world.resource::<world::GameWorld>();
     let stuck = positions.iter().filter(|p| !gw.walkable_world(**p)).count();
     Ok(format!(
-        "sim: {ticks} ticks, {soldiers} soldiers ({stuck} in blocked cells), {enemies} enemies ({dormant} dormant), {kills} kills, ammo {} meds {} scrap {}, objective: {objective}",
+        "sim: {ticks} ticks, {soldiers} soldiers ({stuck} in blocked cells), {enemies} enemies ({dormant} dormant; {kinds}), {kills} kills, ammo {} meds {} scrap {}, objective: {objective}, director: {director}",
         stock.0, stock.1, stock.2
     ))
 }

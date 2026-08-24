@@ -62,6 +62,20 @@ The first custom-bbox run fetches OSM from Overpass and caches it in
 - **Barricades.** `B` + click boards up a carved door or window (scrap,
   hammering noise, enemies smash through given time) — turn any real
   building into a last stand.
+- **Four kinds of infected.** Shamblers; *shriekers* (fragile — but their
+  death scream wakes the block, so do you shoot it?); *runners* (fast, only
+  stir at night or to gunfire and screams); *brutes* (tanks that tear down
+  barricades and shrug off bayonets). Colour-coded on the minimap.
+- **You can see and hear the mechanic.** Every shot draws its true noise
+  radius as an expanding ring; woken sleepers stand up with a "!"; red
+  wedges pulse on the screen edge where hunters approach; the minimap keeps
+  recent noise and last-known ghost blips; blood stays on the streets. All
+  sound is synthesised at startup (no asset files): shots, shrieks, hammer,
+  splintering boards, a horde bed that swells as they close in — panned and
+  attenuated from the camera. `-`/`+` volume, `M` mute.
+- **A director keeps it tense.** Quiet too long? A scout pack finds you.
+  Getting ground down by day? Wake radii ease off for half a minute. Night
+  coming? Something stirs in the distance first. Tension bar on the HUD.
 - **Buildings are solid — and enterable.** Real footprints become walls with
   interior floors; procedural **doors** (≥1 per building where the street
   allows) and **windows** are carved deterministically. Walls are Avian
