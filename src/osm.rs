@@ -45,6 +45,8 @@ pub enum Kind {
     // labelled points
     City,
     Town,
+    /// Supply-drop point of interest (hospital, supermarket, pharmacy).
+    Poi,
 }
 
 #[derive(Debug, Clone)]
@@ -112,7 +114,10 @@ struct Member {
 pub fn build_query(bbox: &BBox, cfg: &MapConfig, metres_per_pixel: f64) -> String {
     let b = bbox.overpass();
     let detail = crate::raster::Detail::for_scale(metres_per_pixel);
-    let landcover = metres_per_pixel < 300.0;
+    let landcover = metres_per_pixel < 60.0;
+    // wide/strategic maps: only the broad land-use classes, to keep
+    // country-sized Overpass responses manageable
+    let landcover_coarse = metres_per_pixel < 300.0;
     let mut q = String::new();
     q.push_str("[out:json][timeout:180];(\n");
     let mut line = |s: &str| {
@@ -137,6 +142,12 @@ pub fn build_query(bbox: &BBox, cfg: &MapConfig, metres_per_pixel: f64) -> Strin
         );
         line(r#"relation["natural"~"^(wood|wetland|beach)$"]({{bbox}});"#);
         line(r#"way["leisure"~"^(park|golf_course)$"]({{bbox}});"#);
+    } else if landcover_coarse {
+        line(r#"way["natural"="water"]({{bbox}});"#);
+        line(r#"way["landuse"~"^(forest|residential|industrial|farmland)$"]({{bbox}});"#);
+        line(r#"relation["landuse"~"^(forest|residential|industrial|farmland)$"]({{bbox}});"#);
+        line(r#"way["natural"~"^(wood|sand|wetland)$"]({{bbox}});"#);
+        line(r#"relation["natural"~"^(wood|wetland)$"]({{bbox}});"#);
     }
     if detail.streams {
         line(r#"way["waterway"="stream"]({{bbox}});"#);
@@ -159,6 +170,8 @@ pub fn build_query(bbox: &BBox, cfg: &MapConfig, metres_per_pixel: f64) -> Strin
     }
     if metres_per_pixel < 120.0 {
         line(r#"node["place"="town"]({{bbox}});"#);
+        line(r#"node["amenity"~"^(hospital|pharmacy)$"]({{bbox}});"#);
+        line(r#"node["shop"="supermarket"]({{bbox}});"#);
     }
     let levels = if detail.local_borders {
         "^(2|3|4|6|8)$"
@@ -361,7 +374,13 @@ pub fn parse_many(jsons: &[String]) -> Result<Vec<Feature>> {
         let kind = match e.tags.get("place").map(String::as_str) {
             Some("city") => Kind::City,
             Some("town") => Kind::Town,
-            _ => continue,
+            _ => match (
+                e.tags.get("amenity").map(String::as_str),
+                e.tags.get("shop").map(String::as_str),
+            ) {
+                (Some("hospital" | "pharmacy"), _) | (_, Some("supermarket")) => Kind::Poi,
+                _ => continue,
+            },
         };
         if e.tags.contains_key("name") {
             out.push(Feature::new(

@@ -9,6 +9,7 @@ use crate::osm::Feature;
 use crate::palette::{self, Palette, Rgba};
 use crate::raster::{self, Overlay, Rendered};
 use crate::scenario::Scenario;
+use crate::ui_font::{UiFont, UiFontPlugin};
 use bevy::asset::RenderAssetUsages;
 use bevy::image::ImageSampler;
 use bevy::input::ButtonState;
@@ -25,7 +26,8 @@ pub struct ViewerPlugin;
 
 impl Plugin for ViewerPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<MapJob>()
+        app.add_plugins(UiFontPlugin)
+            .init_resource::<MapJob>()
             .init_resource::<Editor>()
             .init_resource::<MapStack>()
             .add_systems(Startup, (setup, start_job))
@@ -121,7 +123,12 @@ struct OwnerButton(String);
 // ---------------------------------------------------------------------------
 // Setup / job handling
 
-fn setup(mut commands: Commands, cfg: Res<MapConfig>, mut editor: ResMut<Editor>) {
+fn setup(
+    mut commands: Commands,
+    cfg: Res<MapConfig>,
+    mut editor: ResMut<Editor>,
+    font: Res<UiFont>,
+) {
     commands.spawn((Camera2d, Msaa::Off));
     let text = |bottom: f32| Node {
         position_type: PositionType::Absolute,
@@ -132,20 +139,14 @@ fn setup(mut commands: Commands, cfg: Res<MapConfig>, mut editor: ResMut<Editor>
     };
     commands.spawn((
         Text::new(""),
-        TextFont {
-            font_size: FontSize::Px(13.0),
-            ..default()
-        },
+        font.text_font(13.0),
         TextColor(Color::WHITE),
         text(8.0),
         StatusText,
     ));
     commands.spawn((
         Text::new(""),
-        TextFont {
-            font_size: FontSize::Px(13.0),
-            ..default()
-        },
+        font.text_font(13.0),
         TextColor(Color::srgb(1.0, 0.9, 0.5)),
         text(26.0),
         NoticeText,
@@ -577,10 +578,9 @@ fn typing_input(
             break;
         };
         match &ev.logical_key {
-            Key::Character(c)
-                if buf.len() < 40 => {
-                    buf.push_str(c);
-                }
+            Key::Character(c) if buf.len() < 40 => {
+                buf.push_str(c);
+            }
             Key::Space => buf.push(' '),
             Key::Backspace => {
                 buf.pop();
@@ -768,22 +768,24 @@ fn hotkeys(
     }
 
     // Z: zoom to selection, D: drill down
-    if keys.just_pressed(KeyCode::KeyZ) && !ctrl && !editor.selection.is_empty()
-        && let Some((min, max)) = selection_pixel_bbox(&map.rendered, &editor.selection) {
-            let s = cfg.scale.max(1) as f32;
-            let (w, h) = (
-                map.rendered.canvas.width as f32,
-                map.rendered.canvas.height as f32,
-            );
-            let cx = ((min.0 + max.0) as f32 / 2.0 - w / 2.0) * s;
-            let cy = (h / 2.0 - (min.1 + max.1) as f32 / 2.0) * s;
-            let ext_x = ((max.0 - min.0 + 1) as f32) * s;
-            let ext_y = ((max.1 - min.1 + 1) as f32) * s;
-            let zoom =
-                (ext_x / window.width().max(1.0)).max(ext_y / window.height().max(1.0)) * 1.15;
-            cam.translation = Vec3::new(cx, cy, cam.translation.z);
-            cam.scale = Vec3::new(zoom.clamp(0.05, 20.0), zoom.clamp(0.05, 20.0), 1.0);
-        }
+    if keys.just_pressed(KeyCode::KeyZ)
+        && !ctrl
+        && !editor.selection.is_empty()
+        && let Some((min, max)) = selection_pixel_bbox(&map.rendered, &editor.selection)
+    {
+        let s = cfg.scale.max(1) as f32;
+        let (w, h) = (
+            map.rendered.canvas.width as f32,
+            map.rendered.canvas.height as f32,
+        );
+        let cx = ((min.0 + max.0) as f32 / 2.0 - w / 2.0) * s;
+        let cy = (h / 2.0 - (min.1 + max.1) as f32 / 2.0) * s;
+        let ext_x = ((max.0 - min.0 + 1) as f32) * s;
+        let ext_y = ((max.1 - min.1 + 1) as f32) * s;
+        let zoom = (ext_x / window.width().max(1.0)).max(ext_y / window.height().max(1.0)) * 1.15;
+        cam.translation = Vec3::new(cx, cy, cam.translation.z);
+        cam.scale = Vec3::new(zoom.clamp(0.05, 20.0), zoom.clamp(0.05, 20.0), 1.0);
+    }
     if keys.just_pressed(KeyCode::KeyD) && job.rx.is_none() && !editor.selection.is_empty() {
         if let Some((min, max)) = selection_pixel_bbox(&map.rendered, &editor.selection) {
             let pad = 2.0;
@@ -918,6 +920,7 @@ fn rebuild_panel(
     mut editor: ResMut<Editor>,
     stack: Res<MapStack>,
     panels: Query<Entity, With<OwnerPanel>>,
+    font: Res<UiFont>,
 ) {
     if !editor.panel_dirty {
         return;
@@ -959,10 +962,7 @@ fn rebuild_panel(
     root.with_children(|ui| {
         ui.spawn((
             Text::new("Owners  (L to hide)"),
-            TextFont {
-                font_size: FontSize::Px(13.0),
-                ..default()
-            },
+            font.text_font(13.0),
             TextColor(Color::srgb(0.8, 0.8, 0.8)),
         ));
         for (owner, colour_hex) in editor.scenario.owners.clone() {
@@ -995,10 +995,7 @@ fn rebuild_panel(
                 ));
                 b.spawn((
                     Text::new(format!("{owner} ({})", counts(&owner))),
-                    TextFont {
-                        font_size: FontSize::Px(12.0),
-                        ..default()
-                    },
+                    font.text_font(12.0),
                     TextColor(Color::WHITE),
                 ));
             });
@@ -1015,10 +1012,7 @@ fn rebuild_panel(
         .with_children(|b| {
             b.spawn((
                 Text::new("+ new owner (N)"),
-                TextFont {
-                    font_size: FontSize::Px(12.0),
-                    ..default()
-                },
+                font.text_font(12.0),
                 TextColor(Color::WHITE),
             ));
         });

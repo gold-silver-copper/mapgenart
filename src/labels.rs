@@ -266,6 +266,7 @@ mod tests {
             political_level: Some(4),
             land: None,
             osm_borders: false,
+            enterable_buildings: false,
         };
         let bbox = BBox {
             south: 0.0,
